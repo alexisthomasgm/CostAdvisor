@@ -1,0 +1,56 @@
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
+
+from app.config import get_settings
+from app.database import engine, Base
+from app.routers import (
+    auth, teams, products, cost_models, indexes, prices,
+    volumes, costing, scenarios, suppliers, chemical_families,
+    fx_rates, audit, portfolio, admin, ai,
+)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    yield
+
+
+app = FastAPI(
+    title="CostAdvisor API",
+    version="2.0.0",
+    lifespan=lifespan,
+)
+
+settings = get_settings()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[settings.app_url],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Register routers
+app.include_router(auth.router, prefix="/auth", tags=["auth"])
+app.include_router(teams.router, prefix="/api/teams", tags=["teams"])
+app.include_router(chemical_families.router, prefix="/api/chemical-families", tags=["chemical-families"])
+app.include_router(suppliers.router, prefix="/api/suppliers", tags=["suppliers"])
+app.include_router(products.router, prefix="/api/products", tags=["products"])
+app.include_router(cost_models.router, prefix="/api/cost-models", tags=["cost-models"])
+app.include_router(indexes.router, prefix="/api/indexes", tags=["indexes"])
+app.include_router(prices.router, prefix="/api/prices", tags=["prices"])
+app.include_router(volumes.router, prefix="/api/volumes", tags=["volumes"])
+app.include_router(fx_rates.router, prefix="/api/fx-rates", tags=["fx-rates"])
+app.include_router(costing.router, prefix="/api/costing", tags=["costing"])
+app.include_router(scenarios.router, prefix="/api/scenarios", tags=["scenarios"])
+app.include_router(audit.router, prefix="/api/audit", tags=["audit"])
+app.include_router(portfolio.router, prefix="/api/portfolio", tags=["portfolio"])
+app.include_router(admin.router, prefix="/api/admin", tags=["admin"])
+app.include_router(ai.router, prefix="/api/ai", tags=["ai"])
+
+
+@app.get("/health")
+def health_check():
+    return {"status": "ok"}

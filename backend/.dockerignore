@@ -1,0 +1,33 @@
+# Python
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+
+# Secrets — must NEVER end up in the image
+.env
+.env.local
+.env.*.local
+
+# Celery local state
+celerybeat-schedule
+celerybeat-schedule.*
+celerybeat.pid
+
+# Customer / licensed data — never bake into image
+*.xlsx
+*.xls
+
+# VCS / editor
+.git/
+.gitignore
+.vscode/
+.idea/
+
+# Local DBs
+*.sqlite
+*.sqlite3
+*.db

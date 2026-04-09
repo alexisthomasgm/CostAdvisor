@@ -1,0 +1,217 @@
+import { useState, useEffect } from 'react';
+import { useParams, useNavigate } from 'react-router-dom';
+import EvoChart from '../components/EvoChart';
+import api from '../api';
+
+export default function Brief() {
+  const { costModelId } = useParams();
+  const navigate = useNavigate();
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    if (!costModelId) return;
+    setLoading(true);
+    api.post('/api/costing/brief', { cost_model_id: costModelId })
+      .then(({ data }) => { setData(data); setError(null); })
+      .catch(err => setError(err.response?.data?.detail || 'Failed to load'))
+      .finally(() => setLoading(false));
+  }, [costModelId]);
+
+  if (loading) return <div className="ca-page" style={{ color: 'var(--muted)' }}>Loading...</div>;
+  if (error) return <div className="ca-page" style={{ color: 'var(--accent2)' }}>Error: {error}</div>;
+  if (!data) return null;
+
+  const {
+    product_name, supplier_name, destination_country, currency, unit,
+    current_should_cost, current_actual_price, gap, gap_pct,
+    total_impact, period_label, evolution, narrative, drivers,
+  } = data;
+  const sym = currency === 'EUR' ? '\u20AC' : '$';
+
+  const verdictColor = gap === null ? 'var(--muted)' : gap > 0 ? 'var(--accent2)' : 'var(--accent)';
+  const verdictLabel = gap === null ? 'No actual price data' : gap > 0 ? 'Above should-cost' : 'Below should-cost';
+
+  const theoretical = evolution.map(p => p.theoretical);
+  const actual = evolution.map(p => p.actual ?? 0);
+  const periodLabels = evolution.map(p => p.period);
+
+  return (
+    <div className="ca-page ca-fade-in ca-print-page">
+      {/* Header with print button */}
+      <div className="ca-no-print" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+        <div className="ca-h1">Negotiation Brief</div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button className="ca-btn ca-btn-ghost" onClick={() => navigate(`/cost-models/${costModelId}`)}>View Model</button>
+          <button className="ca-btn ca-btn-ghost" onClick={() => navigate(`/cost-models/${costModelId}/pricing`)}>Pricing</button>
+          <button className="ca-btn ca-btn-ghost" onClick={() => navigate(`/cost-models/${costModelId}/evolution`)}>Evolution</button>
+          <button className="ca-btn ca-btn-primary" onClick={() => window.print()}>Export PDF</button>
+        </div>
+      </div>
+
+      {/* Print-only header */}
+      <div className="ca-print-only" style={{ marginBottom: 20 }}>
+        <div style={{ fontFamily: "'Syne', sans-serif", fontSize: 22, fontWeight: 800 }}>Negotiation Brief</div>
+        <div style={{ fontSize: 10, color: 'var(--muted)' }}>Generated {new Date().toLocaleDateString()}</div>
+      </div>
+
+      {/* Verdict card */}
+      <div className="ca-card" style={{ marginBottom: 16, borderLeft: `3px solid ${verdictColor}` }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 16 }}>
+          <div>
+            <div style={{ fontSize: 10, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>Product</div>
+            <div style={{ fontFamily: "'Syne', sans-serif", fontWeight: 700, fontSize: 15 }}>{product_name}</div>
+            <div style={{ fontSize: 11, color: 'var(--muted)' }}>
+              {supplier_name || 'No supplier'}{destination_country ? ` \u2192 ${destination_country}` : ''}
+            </div>
+          </div>
+          <div>
+            <div style={{ fontSize: 10, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>Should-Cost</div>
+            <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 18, fontWeight: 700, color: 'var(--accent)' }}>
+              {sym}{current_should_cost.toFixed(3)}
+            </div>
+            <div style={{ fontSize: 11, color: 'var(--muted)' }}>per {unit} at {period_label}</div>
+          </div>
+          <div>
+            <div style={{ fontSize: 10, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>Actual Price</div>
+            <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 18, fontWeight: 700, color: 'var(--accent4)' }}>
+              {current_actual_price !== null ? `${sym}${current_actual_price.toFixed(3)}` : '\u2014'}
+            </div>
+          </div>
+          <div>
+            <div style={{ fontSize: 10, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>Assessment</div>
+            <div style={{ fontFamily: "'Syne', sans-serif", fontSize: 18, fontWeight: 700, color: verdictColor }}>
+              {verdictLabel}
+            </div>
+            <div style={{ fontSize: 11, color: verdictColor }}>
+              {gap !== null ? `${gap > 0 ? '+' : ''}${sym}${gap.toFixed(3)} (${gap_pct > 0 ? '+' : ''}${gap_pct.toFixed(1)}%)` : ''}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Total impact */}
+      {total_impact !== null && (
+        <div className="ca-metric" style={{ marginBottom: 16 }}>
+          <div className="ca-metric-lbl">Total Financial Impact (Gap x Volume)</div>
+          <div className="ca-metric-val" style={{ color: total_impact > 0 ? 'var(--accent2)' : 'var(--accent)' }}>
+            {total_impact > 0 ? '+' : ''}{sym}{total_impact.toFixed(0)}
+          </div>
+        </div>
+      )}
+
+      {/* Chart */}
+      <div className="ca-card" style={{ marginBottom: 16 }}>
+        <div className="ca-card-title">Price Evolution</div>
+        <div className="ca-scroll-x">
+          <EvoChart periods={periodLabels} theoretical={theoretical} actual={actual} refCost={current_should_cost} />
+        </div>
+        <div style={{ display: 'flex', gap: 20, marginTop: 14, fontSize: 11 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <div style={{ width: 20, height: 2, background: 'var(--accent4)' }} /> Actual Price
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <div style={{ width: 20, height: 0, borderTop: '2px dashed var(--accent)' }} /> Should-Cost
+          </div>
+        </div>
+      </div>
+
+      {/* Decomposition Waterfall */}
+      {drivers.length > 0 && (
+        <div className="ca-card" style={{ marginBottom: 16 }}>
+          <div className="ca-card-title">Cost Decomposition</div>
+          <div style={{ padding: '16px 0' }}>
+            {(() => {
+              const maxCost = Math.max(...drivers.map(d => Math.abs(d.component_cost)), 0.001);
+              return (
+                <div style={{ display: 'flex', alignItems: 'flex-end', gap: 4, height: 140 }}>
+                  {drivers.map((d, i) => {
+                    const pct = Math.abs(d.component_cost) / maxCost * 100;
+                    return (
+                      <div key={i} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', flex: 1, minWidth: 40 }}>
+                        <div style={{ fontSize: 9, color: 'var(--muted)', marginBottom: 2, whiteSpace: 'nowrap' }}>
+                          {sym}{d.component_cost.toFixed(2)}
+                        </div>
+                        <div style={{
+                          width: '60%', height: `${Math.max(pct, 2)}%`, minHeight: 2,
+                          background: 'var(--accent4)', borderRadius: '3px 3px 0 0', opacity: 0.85,
+                        }} />
+                        <div style={{ fontSize: 8, color: 'var(--text-secondary)', marginTop: 4, textAlign: 'center', lineHeight: 1.2 }}>
+                          {d.component_label}
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {/* Total bar */}
+                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', flex: 1, minWidth: 40, borderLeft: '1px solid var(--border)', paddingLeft: 4 }}>
+                    <div style={{ fontSize: 9, fontWeight: 700, color: 'var(--accent)', marginBottom: 2 }}>
+                      {sym}{current_should_cost.toFixed(2)}
+                    </div>
+                    <div style={{
+                      width: '60%', height: '100%', minHeight: 2,
+                      background: 'var(--accent)', borderRadius: '3px 3px 0 0', opacity: 0.7,
+                    }} />
+                    <div style={{ fontSize: 8, fontWeight: 700, color: 'var(--text-secondary)', marginTop: 4 }}>
+                      SHOULD-COST
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
+          </div>
+          <div style={{ fontSize: 10, color: 'var(--muted)' }}>
+            Each bar shows a component's contribution to the current should-cost estimate.
+          </div>
+        </div>
+      )}
+
+      {/* Cost Drivers */}
+      <div className="ca-card" style={{ marginBottom: 16 }}>
+        <div className="ca-card-title">Top Cost Drivers</div>
+        <table className="ca-table">
+          <thead>
+            <tr>
+              <th>Component</th>
+              <th>Index</th>
+              <th className="center">Index Change</th>
+              <th className="center">Contribution to Gap</th>
+              <th className="center">Direction</th>
+            </tr>
+          </thead>
+          <tbody>
+            {drivers.map((d, i) => (
+              <tr key={i}>
+                <td style={{ fontWeight: 600 }}>{d.component_label}</td>
+                <td style={{ color: 'var(--muted)' }}>{d.index_name || '\u2014'}</td>
+                <td className="center" style={{ color: d.index_change_pct > 0 ? 'var(--accent2)' : d.index_change_pct < 0 ? 'var(--accent)' : 'var(--muted)' }}>
+                  {d.index_change_pct > 0 ? '+' : ''}{d.index_change_pct.toFixed(1)}%
+                </td>
+                <td className="center" style={{ fontFamily: "'JetBrains Mono', monospace" }}>
+                  {sym}{d.contribution_to_gap.toFixed(3)}
+                </td>
+                <td className="center">
+                  <span style={{
+                    display: 'inline-block', padding: '2px 8px', borderRadius: 4, fontSize: 10, fontWeight: 600,
+                    background: d.direction === 'up' ? 'rgba(232,65,24,.15)' : d.direction === 'down' ? 'rgba(79,255,176,.12)' : 'rgba(255,255,255,.05)',
+                    color: d.direction === 'up' ? 'var(--accent2)' : d.direction === 'down' ? 'var(--accent)' : 'var(--muted)',
+                  }}>
+                    {d.direction === 'up' ? '\u2191 Up' : d.direction === 'down' ? '\u2193 Down' : '\u2194 Flat'}
+                  </span>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Narrative */}
+      <div className="ca-card">
+        <div className="ca-card-title">Narrative Summary</div>
+        <div style={{ fontSize: 13, lineHeight: 1.9, color: 'var(--text-secondary)', whiteSpace: 'pre-line' }}>
+          {narrative}
+        </div>
+      </div>
+    </div>
+  );
+}
