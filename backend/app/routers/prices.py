@@ -110,6 +110,7 @@ def update_price(
         ActualPrice.quarter == quarter,
     ).first()
 
+    previous = float(existing.price) if existing else None
     if existing:
         existing.price = data.price
         existing.uploaded_by = current_user.id
@@ -123,6 +124,9 @@ def update_price(
         )
         db.add(existing)
 
+    log_event(db, cm.team_id, current_user.id, "update", "price_data", str(cost_model_id),
+              previous_value={"year": year, "quarter": quarter, "price": previous} if previous is not None else None,
+              new_value={"year": year, "quarter": quarter, "price": float(data.price)})
     db.commit()
     db.refresh(existing)
     return ActualPriceOut.model_validate(existing)
@@ -150,6 +154,8 @@ def delete_price(
     if not price:
         raise HTTPException(status_code=404, detail="Price not found")
 
+    log_event(db, cm.team_id, current_user.id, "delete", "price_data", str(cost_model_id),
+              previous_value={"year": year, "quarter": quarter, "price": float(price.price)})
     db.delete(price)
     db.commit()
     return {"status": "deleted"}

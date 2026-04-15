@@ -8,8 +8,9 @@ from jose import jwt
 from authlib.integrations.httpx_client import AsyncOAuth2Client
 
 from app.config import get_settings
-from app.database import get_db
+from app.database import get_db, current_user_id_var, bypass_rls_var
 from app.models.user import User
+from app.rate_limit import limiter
 from app.models.team import Team, TeamMembership
 from app.schemas.user import UserOut, UserWithTeams
 
@@ -32,7 +33,11 @@ def create_jwt(user_id: uuid.UUID) -> str:
 
 
 def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
-    """FastAPI dependency: extract and validate JWT from cookie, return User."""
+    """FastAPI dependency: extract and validate JWT from cookie, return User.
+
+    Also sets the per-request RLS context so Postgres row-level-security
+    policies can filter by the authenticated user's team memberships.
+    """
     token = request.cookies.get("ca_token")
     if not token:
         raise HTTPException(status_code=401, detail="Not authenticated")
@@ -46,14 +51,31 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
     except jwt.JWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
+    # The users table is global (no RLS), so we can look the user up before
+    # the RLS context is established. After this point, every subsequent
+    # query in this request runs under the user's identity.
+    bypass_rls_var.set(True)
     user = db.query(User).filter(User.id == uuid.UUID(user_id)).first()
-    if user is None:
+    bypass_rls_var.set(False)
+    if user is None or user.deleted_at is not None:
         raise HTTPException(status_code=401, detail="User not found")
+
+    current_user_id_var.set(str(user.id))
+    # Super-admins bypass RLS policies entirely (covers admin.py endpoints
+    # that read across teams). App-layer `require_super_admin` still gates
+    # these routes; bypass here just lets the query itself return rows.
+    if user.is_super_admin:
+        bypass_rls_var.set(True)
+
+    # Attach the user to any error reports Sentry captures on this request.
+    from app.observability import set_user_context
+    set_user_context(str(user.id), user.email)
     return user
 
 
 @router.get("/login")
-async def login():
+@limiter.limit("10/minute")
+async def login(request: Request):
     """Redirect user to Google OAuth consent screen."""
     client = AsyncOAuth2Client(
         client_id=settings.google_client_id,
@@ -66,6 +88,7 @@ async def login():
 
 
 @router.get("/callback")
+@limiter.limit("10/minute")
 async def callback(request: Request, db: Session = Depends(get_db)):
     """Handle Google OAuth callback."""
     code = request.query_params.get("code")
@@ -91,9 +114,16 @@ async def callback(request: Request, db: Session = Depends(get_db)):
     display_name = userinfo.get("name", email.split("@")[0])
     avatar_url = userinfo.get("picture")
 
-    # Upsert user
+    # Upsert user. Team-scoped queries below need RLS bypass: no user identity
+    # is established yet, and the new-user branch creates a team on their behalf.
+    bypass_rls_var.set(True)
     user = db.query(User).filter(User.google_id == google_id).first()
     if user is None:
+        if not settings.allow_signup:
+            raise HTTPException(
+                status_code=403,
+                detail=f"New signups are disabled. Contact {settings.support_email} for access.",
+            )
         user = User(
             google_id=google_id,
             email=email,
@@ -116,6 +146,7 @@ async def callback(request: Request, db: Session = Depends(get_db)):
         user.avatar_url = avatar_url
 
     db.commit()
+    bypass_rls_var.set(False)
 
     # Issue JWT cookie and redirect to frontend
     token_str = create_jwt(user.id)

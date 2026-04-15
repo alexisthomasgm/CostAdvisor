@@ -147,7 +147,7 @@ def get_single_index_value(
     quarter: int,
 ) -> float | None:
     """Get a single resolved index value (override > scraped)."""
-    # Check override first
+    # Check override first (exact region, then GLOBAL fallback)
     override = db.query(IndexOverride).filter(
         IndexOverride.team_id == team_id,
         IndexOverride.commodity_id == commodity_id,
@@ -155,6 +155,15 @@ def get_single_index_value(
         IndexOverride.year == year,
         IndexOverride.quarter == quarter,
     ).first()
+
+    if not override and region != "GLOBAL":
+        override = db.query(IndexOverride).filter(
+            IndexOverride.team_id == team_id,
+            IndexOverride.commodity_id == commodity_id,
+            IndexOverride.region == "GLOBAL",
+            IndexOverride.year == year,
+            IndexOverride.quarter == quarter,
+        ).first()
 
     if override:
         # Null override = intentional blank (team source doesn't cover this period)

@@ -1,5 +1,5 @@
 import { useAuth } from '../AuthContext';
-import { Navigate } from 'react-router-dom';
+import { Link, Navigate } from 'react-router-dom';
 
 export default function Login() {
   const { user, loading } = useAuth();
@@ -10,7 +10,7 @@ export default function Login() {
   return (
     <div style={{
       display: 'flex', flexDirection: 'column', alignItems: 'center',
-      justifyContent: 'center', minHeight: '100vh', gap: 24,
+      justifyContent: 'center', minHeight: 'calc(100vh - 80px)', gap: 24,
     }}>
       <div style={{ textAlign: 'center' }}>
         <div style={{
@@ -30,6 +30,11 @@ export default function Login() {
       >
         Sign in with Google
       </a>
+      <p style={{ color: 'var(--muted)', fontSize: 11, textAlign: 'center', maxWidth: 320 }}>
+        By signing in you agree to our{' '}
+        <Link to="/terms" style={{ color: 'var(--muted)' }}>Terms</Link> and{' '}
+        <Link to="/privacy" style={{ color: 'var(--muted)' }}>Privacy Policy</Link>.
+      </p>
     </div>
   );
 }

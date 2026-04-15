@@ -1,11 +1,12 @@
 import uuid
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models.user import User
 from app.models.cost_model import CostModel
 from app.models.team import TeamMembership
+from app.rate_limit import limiter
 from app.routers.auth import get_current_user
 from app.schemas.costing import (
     ShouldCostRequest, ShouldCostResult,
@@ -80,7 +81,9 @@ def squeeze(
 
 
 @router.post("/brief", response_model=BriefResult)
+@limiter.limit("30/minute")
 async def brief(
+    request: Request,
     data: BriefRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),

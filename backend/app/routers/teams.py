@@ -7,6 +7,7 @@ from app.models.user import User
 from app.models.team import Team, TeamMembership
 from app.routers.auth import get_current_user
 from app.schemas.team import TeamCreate, TeamOut, TeamMemberOut, InviteRequest, RoleUpdate
+from app.services.audit import log_event
 
 router = APIRouter()
 
@@ -102,6 +103,8 @@ def invite_member(
 
     membership = TeamMembership(user_id=user.id, team_id=team_id, role="member")
     db.add(membership)
+    log_event(db, team_id, current_user.id, "invite", "team_member", str(user.id),
+              new_value={"email": data.email, "role": "member"})
     db.commit()
     return {"status": "invited", "email": data.email}
 
@@ -123,7 +126,10 @@ def update_member_role(
     ).first()
     if not membership:
         raise HTTPException(status_code=404, detail="Membership not found")
+    previous_role = membership.role
     membership.role = data.role
+    log_event(db, team_id, current_user.id, "update_role", "team_member", str(user_id),
+              previous_value={"role": previous_role}, new_value={"role": data.role})
     db.commit()
     return {"status": "updated"}
 
@@ -144,6 +150,8 @@ def remove_member(
         raise HTTPException(status_code=404, detail="Membership not found")
     if membership.role == "owner":
         raise HTTPException(status_code=400, detail="Cannot remove team owner")
+    log_event(db, team_id, current_user.id, "remove", "team_member", str(user_id),
+              previous_value={"role": membership.role})
     db.delete(membership)
     db.commit()
     return {"status": "removed"}

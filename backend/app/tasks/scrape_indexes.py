@@ -2,7 +2,7 @@ import asyncio
 from datetime import datetime, timezone
 
 from app.tasks import celery_app
-from app.database import SessionLocal
+from app.database import SessionLocal, bypass_rls_var
 from app.models.index_data import CommodityIndex, IndexOverride, TeamIndexSource
 from app.services.scraper import SCRAPER_REGISTRY, GenericWebScraper
 from app.services.fx_sync import sync_fx_rates
@@ -11,6 +11,7 @@ from app.services.fx_sync import sync_fx_rates
 @celery_app.task(name="app.tasks.scrape_indexes.scrape_all")
 def scrape_all():
     """Run all registered scrapers."""
+    bypass_rls_var.set(True)  # System task — no user context
     db = SessionLocal()
     try:
         commodities = db.query(CommodityIndex).filter(
@@ -44,6 +45,7 @@ def scrape_one(commodity_name: str):
     if not scraper_cls:
         return {"error": f"No scraper for {commodity_name}"}
 
+    bypass_rls_var.set(True)
     db = SessionLocal()
     try:
         scraper = scraper_cls()
@@ -56,6 +58,7 @@ def scrape_one(commodity_name: str):
 @celery_app.task(name="app.tasks.scrape_indexes.scrape_team_sources")
 def scrape_team_sources():
     """Scrape all team-configured URL sources and upsert into IndexOverride."""
+    bypass_rls_var.set(True)
     db = SessionLocal()
     try:
         sources = db.query(TeamIndexSource).filter(

@@ -3,11 +3,13 @@ import api from '../api';
 import { useAuth } from '../AuthContext';
 
 export default function Settings() {
-  const { activeTeamId, teams, refreshUser } = useAuth();
+  const { user, activeTeamId, teams, refreshUser } = useAuth();
   const [members, setMembers] = useState([]);
   const [inviteEmail, setInviteEmail] = useState('');
   const [newTeamName, setNewTeamName] = useState('');
   const [message, setMessage] = useState(null);
+  const [deleteConfirm, setDeleteConfirm] = useState('');
+  const [showDelete, setShowDelete] = useState(false);
 
   const fetchMembers = async () => {
     if (!activeTeamId) return;
@@ -52,6 +54,19 @@ export default function Settings() {
       fetchMembers();
     } catch (err) {
       setMessage({ type: 'error', text: err.response?.data?.detail || 'Failed to remove' });
+    }
+  };
+
+  const handleDeleteAccount = async () => {
+    if (deleteConfirm !== user?.email) {
+      setMessage({ type: 'error', text: 'Type your email exactly to confirm.' });
+      return;
+    }
+    try {
+      await api.delete('/api/account');
+      window.location.href = '/login';
+    } catch (err) {
+      setMessage({ type: 'error', text: err.response?.data?.detail || 'Failed to delete account' });
     }
   };
 
@@ -129,6 +144,38 @@ export default function Settings() {
             </button>
           </div>
         </div>
+      </div>
+
+      <div className="ca-card" style={{ marginTop: 24, borderColor: 'rgba(255,107,107,.3)' }}>
+        <div className="ca-card-title" style={{ color: 'var(--accent2)' }}>Delete account</div>
+        <p style={{ color: 'var(--text-secondary)', fontSize: 12, marginBottom: 12 }}>
+          Teams where you are the sole member are permanently deleted along with all
+          their data. For teams with other members, only your membership is removed.
+          This cannot be undone.
+        </p>
+        {!showDelete ? (
+          <button className="ca-btn-danger" onClick={() => setShowDelete(true)}>
+            Delete my account
+          </button>
+        ) : (
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <input
+              className="ca-input"
+              placeholder={`Type ${user?.email} to confirm`}
+              value={deleteConfirm}
+              onChange={e => setDeleteConfirm(e.target.value)}
+            />
+            <button className="ca-btn-danger" onClick={handleDeleteAccount}>
+              Confirm delete
+            </button>
+            <button
+              className="ca-btn ca-btn-sm"
+              onClick={() => { setShowDelete(false); setDeleteConfirm(''); }}
+            >
+              Cancel
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

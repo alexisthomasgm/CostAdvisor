@@ -22,6 +22,7 @@ class User(Base):
     )
     is_super_admin: Mapped[bool] = mapped_column(Boolean, default=False)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     # Relationships
     memberships = relationship("TeamMembership", back_populates="user", lazy="selectin")

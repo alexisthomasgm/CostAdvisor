@@ -168,7 +168,7 @@ class INSEEScraper(BaseScraper):
         super().__init__(self.commodity_name)
 
     async def fetch(self) -> list[ScrapedDataPoint]:
-        url = f"{self.INSEE_BASE_URL}/{self.INSEE_IDBANK}?lastNObservations=24"
+        url = f"{self.INSEE_BASE_URL}/{self.INSEE_IDBANK}?lastNObservations=60"
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.get(url)
             resp.raise_for_status()
@@ -280,6 +280,7 @@ from app.services.scrapers.eurostat import (
 from app.services.scrapers.fred import (
     FREDScraper,
     FREDECIScraper, FREDPPIChemicalsScraper, FREDIndustrialProductionScraper,
+    FREDPPIChlorineScraper,
 )
 from app.services.scrapers.ecb import (
     ECBScraper,
@@ -287,9 +288,12 @@ from app.services.scrapers.ecb import (
     ECBJPYEURScraper, ECBIDREURScraper, ECBPHPEURScraper,
 )
 from app.services.scrapers.worldbank import WorldBankScraper, WorldBankUreaScraper
+from app.services.scrapers.eia import EIAScraper, EIABrentOilScraper
 
 # Registry: maps commodity name → scraper class
 SCRAPER_REGISTRY: dict[str, type[BaseScraper]] = {
+    # EIA (U.S. Energy Information Administration — public domain)
+    "Brent Crude Oil (EIA)": EIABrentOilScraper,
     # INSEE (metals & energy)
     "Oil Price": BrentOilScraper,
     "Aluminum": AluminumScraper,
@@ -312,6 +316,7 @@ SCRAPER_REGISTRY: dict[str, type[BaseScraper]] = {
     "ECI USA": FREDECIScraper,
     "PPI Chemicals USA": FREDPPIChemicalsScraper,
     "Industrial Production USA": FREDIndustrialProductionScraper,
+    "PPI Chlorine USA": FREDPPIChlorineScraper,
     # ECB (exchange rates)
     "EUR/USD": ECBEURUSDScraper,
     "GBP/EUR": ECBGBPEURScraper,
@@ -325,6 +330,7 @@ SCRAPER_REGISTRY: dict[str, type[BaseScraper]] = {
 
 # Maps commodity name → human-readable source label (e.g. "INSEE", "Eurostat")
 _BASE_CLASS_LABELS = {
+    EIAScraper: "EIA",
     INSEEScraper: "INSEE",
     EurostatScraper: "Eurostat",
     FREDScraper: "FRED",
@@ -432,8 +438,8 @@ class INSEEAdHocScraper:
         return latest.value
 
     async def scrape_all(self) -> list[ScrapedDataPoint]:
-        """Fetch all available quarterly averages (up to 24 months)."""
-        url = f"{self.INSEE_BASE_URL}/{self.idbank}?lastNObservations=24"
+        """Fetch all available quarterly averages (up to 60 months)."""
+        url = f"{self.INSEE_BASE_URL}/{self.idbank}?lastNObservations=60"
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.get(url)
             resp.raise_for_status()

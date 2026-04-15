@@ -352,6 +352,8 @@ def clone_cost_model(
             )
             db.add(fc)
 
+    log_event(db, clone.team_id, current_user.id, "clone", "cost_model", str(clone.id),
+              new_value={"source_cost_model_id": str(original.id)})
     db.commit()
     db.refresh(clone)
     return _build_cost_model_out(clone)

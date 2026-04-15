@@ -38,6 +38,10 @@ def run_migrations_online():
     with connectable.connect() as connection:
         context.configure(connection=connection, target_metadata=target_metadata)
         with context.begin_transaction():
+            # Migrations run with RLS bypassed so data migrations over
+            # team-scoped tables are not filtered by policies.
+            from sqlalchemy import text
+            connection.execute(text("SELECT set_config('app.bypass_rls', 'on', true)"))
             context.run_migrations()
 
 

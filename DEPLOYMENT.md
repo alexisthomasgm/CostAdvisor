@@ -1,6 +1,8 @@
-# CostAdvisor — Deployment Runbook
+# CostAdvisor — Deployment Runbook (Customer-Grade POC)
 
-This is the complete walkthrough from your laptop to a hosted website. Follow it top to bottom in order. Every step that requires your hands on a keyboard or a console is here. Any step marked with a clipboard 📋 is something only you can do (signup, click, payment, OAuth console).
+This is the complete walkthrough from your laptop to a hosted website that real customers can sign up for. Follow it top to bottom in order. Every step that requires your hands on a keyboard or a console is here. Any step marked with a clipboard 📋 is something only you can do (signup, click, payment, OAuth console).
+
+This is **POC-grade**, not enterprise. It is built to be safely usable by a small number of paying or trial customers. It is not SOC2, not multi-region, not zero-downtime. The deltas from a real production system are listed at the bottom.
 
 ---
 
@@ -21,18 +23,34 @@ This is the complete walkthrough from your laptop to a hosted website. Follow it
                               ┌──────────▼──┐    ┌─────▼─────────┐
                               │  Postgres   │    │     Redis     │
                               │ (Railway)   │    │  (Railway)    │
-                              └─────────────┘    └─────▲─────────┘
-                                                       │
-                                          ┌────────────┴────────┐
-                                          │ Railway: Worker svc │
-                                          │ celery worker+beat  │
-                                          └─────────────────────┘
+                              └─────┬───────┘    └─────▲─────────┘
+                                    │                  │
+                                    │       ┌──────────┴──────────┐
+                                    │       │ Railway: Worker svc │
+                                    │       │ celery worker+beat  │
+                                    │       └─────────────────────┘
+                                    │
+                              ┌─────▼───────────┐
+                              │  Backblaze B2   │
+                              │  Nightly dumps  │
+                              └─────────────────┘
 
-LLM in production: NONE running. Redis cache is pre-warmed before each demo
-from your laptop running Ollama locally. See Phase 10.
+      ┌────────────────────────────────────────────────────────┐
+      │  Tailscale tailnet                                     │
+      │                                                        │
+      │   Railway api+worker  ◄──────►  Hetzner CCX13          │
+      │                                  Ollama llama3.2:3b    │
+      └────────────────────────────────────────────────────────┘
+
+  Sentry (errors) + UptimeRobot (health) observe both Railway services.
 ```
 
-**Total monthly cost target:** ~$5–15 once Railway's free trial credit runs out, plus ~$10/year for the domain.
+**Cost target:** ~$30–45/mo all-in. Breakdown:
+- Railway (API + Worker + Postgres + Redis): ~$10–20
+- Hetzner CCX13 (Ollama): ~$13
+- Backblaze B2 (backups): <$1
+- Cloudflare domain: ~$10/yr
+- Sentry, UptimeRobot, Tailscale: free hobby tiers
 
 ---
 
@@ -44,546 +62,764 @@ These changes were made during deployment prep — you don't need to redo them:
 - `backend/app/config.py` — added `environment` and `llm_enabled` settings
 - `backend/app/routers/auth.py` — login cookie now uses `secure=True`/`samesite=none` in production
 - `backend/app/routers/admin.py` — same fix for impersonation cookies
-- `backend/app/services/ollama.py` — respects `LLM_ENABLED=false` (cache-only mode)
-- `backend/celeryconfig.py` — fixed beat schedule to use proper `crontab()` (was a latent bug — bare dict schedules don't work)
+- `backend/app/services/ollama.py` — respects `LLM_ENABLED=false` (cache-only mode, kept as a fallback knob)
+- `backend/celeryconfig.py` — fixed beat schedule to use proper `crontab()`
 - `backend/app/tasks/__init__.py` — added `autodiscover_tasks` so the worker finds task modules
-- `backend/alembic.ini` — removed hardcoded dev DB URL (`alembic/env.py` already overrides at runtime)
+- `backend/alembic.ini` — removed hardcoded dev DB URL
 - `frontend/src/api.js` — `baseURL` now reads `VITE_API_BASE_URL` env var
 
 ### Files created
 - `backend/Dockerfile` — production-ready, honors Railway's `$PORT`, runs as non-root
-- `backend/.dockerignore` — keeps secrets, venv, and licensed `*.xlsx` out of the image
-- `backend/scripts/warm_cache.py` — the LLM cache warm-up script (Phase 10)
-- `backend/.env.example` — sanitized template (real Google secret was scrubbed)
+- `backend/.dockerignore` — keeps secrets and venv out of the image
+- `backend/.env.example` — sanitized template
 - `frontend/.env.example` — documents `VITE_API_BASE_URL`
-- `frontend/public/_redirects` — Cloudflare Pages SPA fallback so direct URLs to `/admin`, `/login` etc. don't 404
-- `.gitignore` (repo root) — covers `.env`, `venv/`, `node_modules/`, `*.xlsx`, etc.
+- `frontend/public/_redirects` — Cloudflare Pages SPA fallback
+- `.gitignore` (repo root)
 
-### Things deliberately left alone
-- The Google OAuth client secret is **not rotated** (your call, given the file has never been pushed). It still lives in your local `backend/.env`. The `.env.example` placeholder is safe to commit.
-- `vite.config.js` proxy still points at localhost — that's fine; the proxy is dev-only, never bundled.
-- No CI/CD, no monitoring, no Sentry. Add later.
+### What's NOT yet done — built in Phase 1 below
+- Tenancy audit + RLS policies + cross-tenant tests
+- Account deletion endpoint
+- Audit-log enforcement on writes
+- Rate limiting
+- Privacy policy + Terms pages, support email wiring
+- New-user provisioning hardening on first Google login
 
 ---
 
 ## Accounts you need (one-time setup)
 
-📋 Create accounts at all of these before starting. All have free signup:
+📋 Create accounts at all of these before starting:
 
 | Service | Used for | Cost |
 |---|---|---|
 | **GitHub** | Source repo (private) | Free |
-| **Cloudflare** | DNS, domain registration, frontend hosting (Pages) | Free, ~$10/yr for the domain |
-| **Railway** | Backend API, worker, Postgres, Redis | $5 free trial credit, then ~$5–15/mo |
+| **Cloudflare** | DNS, domain, Pages | Free, ~$10/yr for the domain |
+| **Railway** | API, Worker, Postgres, Redis | ~$10–20/mo |
+| **Hetzner Cloud** | Ollama VM (CCX13) | ~$13/mo |
+| **Tailscale** | Private mesh between Railway and Hetzner | Free (hobby tier ≤3 users, 100 devices) |
+| **Backblaze B2** | Encrypted off-site backups | <$1/mo for this volume |
+| **Sentry** | Error tracking | Free hobby tier |
+| **UptimeRobot** | Health pings | Free tier (5-min interval, 50 monitors) |
 | **Google Cloud Console** | OAuth credentials | Free, you already have this |
 
 ---
 
 ## Phase 0 — Local sanity check (10 min)
 
-📋 Before touching anything else, verify the local app still runs after the code changes I made.
+📋 Verify the local app still runs after the prep work.
 
 ```bash
 cd /home/alexis/costadvisor
 
-# 1. Make sure Postgres + Redis are running locally
 pg_isready
 redis-cli ping   # should print PONG
 
-# 2. Run migrations against your local DB (in case schema drifted)
 cd backend
 source venv/bin/activate
 alembic upgrade head
 
-# 3. Start the local stack
 cd ..
 ./start.sh
 ```
 
 **Verify:**
-- Backend logs show no startup errors
 - `http://localhost:8000/health` returns `{"status":"ok"}`
-- `http://localhost:8000/docs` loads (FastAPI swagger)
-- `http://localhost:5173` loads the React app
-- Click "Login," go through Google OAuth, end up logged in
-- You can see your data (cost models, indexes, etc.)
+- `http://localhost:8000/docs` loads
+- `http://localhost:5173` loads
+- Google OAuth login works end-to-end
+- You see your data
 
-If anything fails here, fix it before proceeding. **Do not move on with broken local state.**
+If anything fails here, fix it before proceeding.
 
 ---
 
-## Phase 1 — Git + GitHub (5 min)
+## Phase 1 — Code work for customer-grade (1–2 days)
+
+📋 This is the single biggest delta from the old demo plan. None of this can be deferred without exposing customer data. Do it before touching any deploy infra. Each item is a separate commit.
+
+### 1a. Tenancy audit (read-the-code work)
+
+Walk every file under `backend/app/routers/` and `backend/app/services/`. For each function that reads or writes a model with a `team_id` or `user_id` column, confirm the query filters by the current user's team. Make a checklist file as you go (`docs/tenancy_audit.md`, gitignored or kept) and tick off each route.
+
+What to look for:
+- `db.query(Model).filter(Model.id == ...)` with **no** `team_id` filter — this is the bug pattern
+- `.all()` calls that return everything in a table
+- Joins where the join condition crosses tenant boundaries
+- Background tasks (Celery) that loop over models without scoping — these are easy to miss
+
+Fix every leak you find. This is not optional.
+
+### 1b. Postgres Row-Level Security as backstop
+
+Even after a clean audit, add RLS policies so a future query bug can't accidentally leak across tenants. The database physically refuses.
+
+Create `backend/alembic/versions/<timestamp>_enable_rls.py` that:
+1. Enables RLS on every team-scoped table (`ALTER TABLE foo ENABLE ROW LEVEL SECURITY`)
+2. Creates a policy per table: `USING (team_id = current_setting('app.current_team_id')::uuid)`
+3. Adds a SQLAlchemy `before_cursor_execute` event listener in `backend/app/db.py` that issues `SET LOCAL app.current_team_id = '<uuid>'` at the start of every request, sourced from the authenticated user's team.
+
+Tables likely needing RLS (verify against your schema): `cost_models`, `cost_periods`, `purchases`, `formulas`, `audit_log`, anything else with `team_id`. Indexes (the licensed shared data) are global — no RLS, just read-only for non-admin users.
+
+### 1c. Cross-tenant integration tests
+
+Add `backend/tests/test_tenancy.py`. Test pattern:
+1. Create Tenant A user, create a `cost_model` owned by A
+2. Create Tenant B user, log in as B
+3. Hit every read/write endpoint that takes a model ID, passing A's model ID
+4. Assert 404 (preferred — don't leak existence) on every one
+
+Run in CI before any deploy. If you don't have CI yet, run them locally before each `git push`.
+
+### 1d. Self-signup hardening
+
+Your Google OAuth handles login for existing users. Verify the **first-time** flow:
+- New Google user lands on `/auth/callback` → user row created → default team created (just for them) → logged in
+- The default team should have them as the sole owner. No silent membership in someone else's team.
+- If you want to gate signup (e.g., invite-only later), add an `allow_signup` flag now in `config.py` and check it in `auth.py`. Default `true` for the POC.
+
+### 1e. Account deletion endpoint
+
+GDPR baseline plus general hygiene. Add `DELETE /api/account` that:
+- Soft-deletes the user (sets `deleted_at`)
+- Hard-deletes their team's data **if they are the sole member** (cost models, periods, purchases, formulas, etc.)
+- If they are a member of a team with others, just removes them from the team
+- Logs the deletion to `audit_log`
+- Invalidates their session
+
+UI: a "Delete account" button in account settings, behind a typed-confirmation modal.
+
+### 1f. Audit log enforcement
+
+You already have an `audit_log` model. Walk the same routers from 1a and confirm every **write** (POST/PUT/PATCH/DELETE) on tenant data calls `log_event(user_id, team_id, action, resource_type, resource_id, metadata)`. Add the calls where missing.
+
+### 1g. Rate limiting
+
+Add `slowapi` (FastAPI-friendly Redis-backed rate limiter). Limits to apply:
+- `/auth/*` — 10/min per IP (brute-force defense)
+- LLM-backed endpoints (brief generation, AI analysis) — 30/min per user (cost defense)
+- Everything else — 120/min per user (sanity ceiling)
+
+Returns 429 with a `Retry-After` header. Frontend should show a friendly toast on 429.
+
+### 1h. Privacy policy + Terms pages
+
+Two static React routes: `/privacy` and `/terms`. Linked from the footer and the signup screen ("By signing in you agree to ..."). Keep them short and honest. Cover at minimum:
+- What data you collect (email, OAuth subject, anything they enter)
+- That you process it on Railway (US) and a Hetzner box (Germany or wherever)
+- That you back up to Backblaze B2 encrypted
+- That they can delete their account at any time (link to the flow from 1e)
+- Support contact: **alexis@staminachem.com**
+
+You don't need a lawyer for a POC, but write them yourself — don't paste a generator template you haven't read.
+
+### 1i. Support email wiring
+
+- Footer: `Questions? alexis@staminachem.com`
+- Generic error page: same email
+- 500 errors logged to Sentry (set up in Phase 13) get tagged with the user's email (so when someone emails support you can find their session)
+- Set up an inbox/forwarding for `alexis@staminachem.com` if you haven't already
+
+### 1j. Commit, push, run the tenancy tests
+
+```bash
+cd /home/alexis/costadvisor
+cd backend && pytest tests/test_tenancy.py -v
+```
+
+All green before you continue. If anything fails, the leak is real — fix it now.
+
+---
+
+## Phase 2 — Git + GitHub (5 min)
 
 📋 The repo is currently not under version control.
 
 ```bash
 cd /home/alexis/costadvisor
 
-# Initialize git (the .gitignore already exists — created during prep)
 git init
 git branch -M main
-
-# CRITICAL: verify nothing sensitive will be tracked
 git status
 ```
 
-**Look at the output. The following files should NOT appear in untracked files:**
+**The following files should NOT appear in untracked files:**
 - `backend/.env`
-- `backend/venv/` (or any file under it)
-- `frontend/node_modules/` (or any file under it)
-- `jacobi_demo_data.xlsx`
+- `backend/venv/`
+- `frontend/node_modules/`
 - `backend/__pycache__/` or any `*.pyc`
 - `backend/celerybeat-schedule`
 
-If any of those show up, **stop** and fix the `.gitignore` before committing. Common reason: a typo in the gitignore pattern or you ran `git add -f` somewhere.
+If any show up, fix `.gitignore` before committing.
 
 ```bash
-# Stage everything not gitignored
 git add .
 git status   # one more sanity check
-git commit -m "Initial commit: deployment-ready"
+git commit -m "Initial commit: customer-grade POC ready"
 ```
 
-📋 On GitHub:
-1. Click **+ → New repository**
-2. Name it `costadvisor` (or whatever you like)
-3. **Visibility: Private**
-4. Do NOT initialize with README/license/.gitignore — your repo already has files
-5. Click "Create"
+📋 On GitHub: create a **private** repo named `costadvisor`. Do NOT initialize with README/license/.gitignore.
 
 ```bash
-# Push (replace YOURNAME with your GitHub username)
 git remote add origin git@github.com:YOURNAME/costadvisor.git
 git push -u origin main
 ```
 
-**Verify:**
-- The repo on GitHub shows your files
-- Click into `backend/` and confirm there's no `.env` file visible (only `.env.example`)
-- `jacobi_demo_data.xlsx` should also not be there
-
-If `.env` made it into the commit somehow: `git rm --cached backend/.env`, commit, push. The secret is technically in history at that point; if you care, force a history rewrite with `git filter-repo` (instructions on the filter-repo docs page).
+**Verify on GitHub** that no `.env` is visible.
 
 ---
 
-## Phase 2 — Domain (can be done in parallel with Phase 3)
+## Phase 3 — Domain (parallel with Phase 4)
 
-📋 You said the domain is WIP. Two options:
+📋 Two options:
 
-**Option A — buy at Cloudflare Registrar.** Cheapest, no markup. Cloudflare Dashboard → Domain Registration → Register Domains → search → buy. ~$10/yr. Auto-creates the DNS zone.
+**Option A — Cloudflare Registrar.** Cheapest, no markup. Dashboard → Domain Registration → Register Domains → buy. Auto-creates the DNS zone.
 
-**Option B — you already have a domain elsewhere.** Add it to Cloudflare:
-1. Cloudflare Dashboard → Add a Site → enter the domain
-2. Free plan
-3. Copy the two Cloudflare nameservers it shows you
-4. Go to your current registrar (Porkbun/Namecheap/whoever) → change nameservers to those two
-5. Wait 5–60 min for propagation
+**Option B — Domain elsewhere.** Add it to Cloudflare: Dashboard → Add a Site → Free plan → copy nameservers → change them at your current registrar. 5–60 min propagation.
 
-**You don't need to point any DNS records yet** — we'll do that in Phase 9. For now you just need the domain in Cloudflare so it's ready.
-
-Pick a subdomain plan now so Phase 4 and 8 are unambiguous:
-- Frontend: `https://yourdomain.com` (root)
+Pick the subdomain plan now:
+- Frontend: `https://yourdomain.com`
 - API: `https://api.yourdomain.com`
 
-Write these down. You'll type them into Railway and Cloudflare Pages soon.
+Write these down. They go into Railway, Cloudflare Pages, and Google OAuth.
 
 ---
 
-## Phase 3 — Railway: project + Postgres + Redis (5 min)
+## Phase 4 — Hetzner: Ollama box (20 min)
+
+📋 The LLM runs on a private VM, reachable from Railway only over Tailscale. Customers' data never leaves your perimeter.
+
+### 4a. Provision the VM
+
+1. Hetzner Cloud Console → New Project (`costadvisor`) → New Server
+2. **Location:** pick the same region as your Railway deployment (Railway is US-East by default → Hetzner Ashburn). Latency between API and LLM matters.
+3. **Image:** Ubuntu 24.04
+4. **Type:** CCX13 (2 dedicated vCPU, 8 GB RAM, ~$13/mo)
+5. **SSH key:** add yours
+6. **Name:** `ollama-1`
+7. Create
+
+### 4b. Install Ollama + Tailscale
+
+SSH in:
+
+```bash
+ssh root@<vm-ip>
+
+# Updates + basic hardening
+apt update && apt upgrade -y
+apt install -y ufw fail2ban
+ufw default deny incoming
+ufw default allow outgoing
+ufw allow 22/tcp
+ufw --force enable
+
+# Ollama
+curl -fsSL https://ollama.com/install.sh | sh
+systemctl enable --now ollama
+
+# Pull the model (will take a minute)
+ollama pull llama3.2:3b
+
+# Tailscale
+curl -fsSL https://tailscale.com/install.sh | sh
+tailscale up --ssh
+# Follow the printed URL to authenticate against your Tailscale account
+# Once joined, copy the Tailscale IP — looks like 100.x.y.z
+tailscale ip -4
+```
+
+### 4c. Lock Ollama to Tailscale only
+
+By default Ollama listens on `127.0.0.1:11434`. Bind it to the Tailscale interface so only Railway (also on the tailnet) can reach it.
+
+```bash
+mkdir -p /etc/systemd/system/ollama.service.d
+cat > /etc/systemd/system/ollama.service.d/override.conf <<EOF
+[Service]
+Environment="OLLAMA_HOST=0.0.0.0:11434"
+EOF
+
+systemctl daemon-reload
+systemctl restart ollama
+
+# Confirm UFW still blocks 11434 from public — only Tailscale (which uses WireGuard, not 11434) can reach it
+ufw status
+```
+
+**Verify from your laptop (also on the tailnet):**
+
+```bash
+curl http://<tailscale-ip>:11434/api/tags
+# Should return JSON listing llama3.2:3b
+```
+
+Write down the Tailscale IP. It becomes `OLLAMA_URL` in Railway.
+
+---
+
+## Phase 5 — Railway: project + Postgres + Redis (5 min)
 
 📋 In Railway:
 
-1. **New Project → Empty Project**. Name it `costadvisor`.
-2. Inside the project: **+ New → Database → Add PostgreSQL**. Wait a few seconds for it to provision.
-3. **+ New → Database → Add Redis**. Same.
+1. **New Project → Empty Project**, name `costadvisor`
+2. **+ New → Database → Add PostgreSQL**
+3. **+ New → Database → Add Redis**
 
-You now have two managed data services. Railway has automatically created `DATABASE_URL` and `REDIS_URL` reference variables you can wire into other services.
-
-**Verify:**
-- Click the Postgres service → Variables tab → see `DATABASE_URL` populated
-- Click the Redis service → Variables tab → see `REDIS_URL` populated
-
-Don't touch them. We'll reference them from the API and Worker services in the next phase.
+**Verify** both services have `DATABASE_URL` and `REDIS_URL` populated in their Variables tab. Don't touch them — referenced from API/Worker next.
 
 ---
 
-## Phase 4 — Railway: API service (10 min)
+## Phase 6 — Railway: API service (15 min)
 
 📋 In the same Railway project:
 
-1. **+ New → GitHub Repo → select `costadvisor`**. Authorize Railway to access the repo if prompted.
-2. Railway will detect the repo. After it spins up the service:
-   - Click the new service → **Settings**
+1. **+ New → GitHub Repo → costadvisor**. Authorize Railway if prompted.
+2. After it spins up: click the service → **Settings**
    - **Service Name:** `api`
-   - **Root Directory:** `backend` ← important, otherwise Railway will look for a Dockerfile at the repo root
-   - **Builder:** Dockerfile (Railway should auto-detect `backend/Dockerfile`)
-3. Go to **Variables** tab and add (use "+ New Variable"):
+   - **Root Directory:** `backend`
+   - **Builder:** Dockerfile
+
+### 6a. Tailscale on Railway
+
+Railway services need to be on the tailnet to reach Ollama.
+
+- In Tailscale admin → Settings → Auth Keys → Generate auth key → **Reusable: yes, Ephemeral: yes, Tagged: `tag:railway`** → copy the key
+- In Railway api service Variables, add `TAILSCALE_AUTHKEY = <the key>`
+- Edit `backend/Dockerfile` to install Tailscale and start it before uvicorn. Add this near the top of the runtime stage:
+
+  ```dockerfile
+  RUN curl -fsSL https://tailscale.com/install.sh | sh
+  ```
+
+  And replace the CMD with an entrypoint script that brings Tailscale up first:
+
+  ```bash
+  #!/bin/sh
+  /usr/sbin/tailscaled --tun=userspace-networking --socks5-server=localhost:1055 &
+  sleep 2
+  tailscale up --authkey=$TAILSCALE_AUTHKEY --hostname=railway-api-$(hostname) --ephemeral
+  exec uvicorn app.main:app --host 0.0.0.0 --port $PORT
+  ```
+
+  Commit this change and push.
+
+### 6b. Variables
 
 | Name | Value |
 |---|---|
 | `ENVIRONMENT` | `production` |
-| `DATABASE_URL` | `${{Postgres.DATABASE_URL}}` (Railway reference syntax) |
+| `DATABASE_URL` | `${{Postgres.DATABASE_URL}}` |
 | `REDIS_URL` | `${{Redis.REDIS_URL}}` |
-| `JWT_SECRET` | run `python -c "import secrets; print(secrets.token_urlsafe(48))"` and paste the output |
+| `JWT_SECRET` | `python -c "import secrets; print(secrets.token_urlsafe(48))"` output |
 | `JWT_ALGORITHM` | `HS256` |
 | `JWT_EXPIRY_HOURS` | `72` |
-| `GOOGLE_CLIENT_ID` | (from your existing `backend/.env`) |
-| `GOOGLE_CLIENT_SECRET` | (from your existing `backend/.env`) |
-| `APP_URL` | `https://yourdomain.com` (the root domain you picked) |
+| `GOOGLE_CLIENT_ID` | from Google Console (rotate from your dev value — see Phase 9) |
+| `GOOGLE_CLIENT_SECRET` | from Google Console (rotated) |
+| `APP_URL` | `https://yourdomain.com` |
 | `API_URL` | `https://api.yourdomain.com` |
-| `LLM_ENABLED` | `false` (cache-only mode — Phase 10 populates the cache) |
-| `OLLAMA_URL` | `http://disabled` (placeholder; with LLM_ENABLED=false this is never called) |
-| `OLLAMA_MODEL` | `llama3.2:3b` (must match what you'll run locally during warm-up) |
+| `LLM_ENABLED` | `true` |
+| `OLLAMA_URL` | `http://<hetzner-tailscale-ip>:11434` |
+| `OLLAMA_MODEL` | `llama3.2:3b` |
+| `OLLAMA_TIMEOUT` | `60` |
+| `TAILSCALE_AUTHKEY` | (from Phase 6a) |
+| `SENTRY_DSN` | (filled in Phase 13) |
+| `SUPPORT_EMAIL` | `alexis@staminachem.com` |
+| `ALLOW_SIGNUP` | `true` |
 
-4. **Networking** tab → **Generate Domain**. Railway gives you something like `costadvisor-api-production-XXXX.up.railway.app`. Copy it — you'll use it temporarily until DNS is wired.
+3. **Networking → Generate Domain**. Copy the `*.up.railway.app` URL.
 
-5. The service should rebuild and deploy automatically. Watch the **Deployments** tab for the build log. First build takes ~3–5 min.
+### 6c. Verify
 
-**Verify:**
-- Build logs show no errors
+- Build logs show no errors, including the Tailscale install
 - Deployment is "Active"
-- `https://<railway-generated-url>/health` returns `{"status":"ok"}`
-- `https://<railway-generated-url>/docs` loads the FastAPI swagger
+- `https://<railway-url>/health` returns `{"status":"ok"}`
+- In Railway Logs, you should see Tailscale connect messages
+- In Tailscale admin, you should see `railway-api-*` ephemeral nodes appear
 
-If the build fails: read the log carefully. Common issues:
-- "No such file requirements.txt" → Root Directory not set to `backend`
-- "psycopg2 fails to install" → unlikely; we use `psycopg2-binary`
-- DB connection error at startup → `DATABASE_URL` reference variable not wired correctly
+If the API can't reach Ollama: `railway run curl http://<hetzner-tailscale-ip>:11434/api/tags` from your laptop with the project linked. Should return the model list. If it doesn't, Tailscale isn't up inside the container — check the entrypoint logs.
 
 ---
 
-## Phase 5 — Railway: Worker service (5 min)
+## Phase 7 — Railway: Worker service (10 min)
 
-📋 The same backend image runs as a Celery worker with a different start command.
+📋 Same image, different command, same Tailscale setup (the worker also needs Ollama for any background LLM tasks).
 
-1. In the Railway project: **+ New → GitHub Repo → costadvisor** (yes, the same repo again — Railway supports multiple services pointing at one repo).
+1. **+ New → GitHub Repo → costadvisor** (same repo, second service)
 2. **Settings:**
    - **Service Name:** `worker`
    - **Root Directory:** `backend`
    - **Builder:** Dockerfile
-   - **Custom Start Command:** `celery -A app.tasks worker --beat --loglevel=info`
-3. **Variables** — copy the same set as the API service. Easiest way: in the Variables tab, click "Raw Editor" on the api service, copy everything, paste into the worker service. The worker needs `DATABASE_URL`, `REDIS_URL`, `JWT_SECRET` (used by some scheduled tasks), all the index API keys, and the LLM vars too.
-4. **Networking:** the worker has no public HTTP — leave it private. No domain needed.
+   - **Custom Start Command:** `/app/entrypoint-worker.sh`
+3. Create `backend/entrypoint-worker.sh`:
 
-**Verify:**
-- Build succeeds
-- Deploy logs show Celery banner: `celery@<hostname> v5.4.0`
-- "Loading" + "ready" messages, then idle (waiting for tasks)
-- No tracebacks
+   ```bash
+   #!/bin/sh
+   /usr/sbin/tailscaled --tun=userspace-networking --socks5-server=localhost:1055 &
+   sleep 2
+   tailscale up --authkey=$TAILSCALE_AUTHKEY --hostname=railway-worker-$(hostname) --ephemeral
+   exec celery -A app.tasks worker --beat --loglevel=info
+   ```
 
-If you see `KeyError: 'celeryconfig'` → the worker is running from the wrong directory; double-check Root Directory is `backend`.
+   Make it executable, commit, push.
+4. **Variables:** copy the entire api set via Raw Editor (worker needs all the same env).
+5. **Networking:** no public domain.
+
+**Verify:** worker logs show Celery banner + Tailscale up. No tracebacks.
 
 ---
 
-## Phase 6 — Migrations + initial data (10 min)
+## Phase 8 — Migrations + seed (10 min)
 
-📋 The Postgres is empty. You need to:
-1. Run Alembic migrations to create the schema
-2. Get demo data into it (your seed scripts)
+📋 The Postgres is empty. Public index data → seed directly on Railway, no laptop dump dance.
 
 ### Run migrations
 
-In Railway, click the **api** service → **... menu → "Run a command"** (or use the Railway CLI: `railway run alembic upgrade head` from your laptop with the project linked). Run:
+In Railway, click the **api** service → **... menu → "Run a command"**:
 
 ```
 alembic upgrade head
 ```
 
-You should see Alembic apply each migration. Verify by checking the Postgres service → Data tab; tables should now exist.
+Verify migrations applied (Postgres → Data tab → tables exist, including the new RLS migration from Phase 1b).
 
-### Seed the data — privacy-conscious approach
+### Seed the public index data
 
-The seed scripts read `jacobi_demo_data.xlsx`, which contains licensed data. **You don't want that file inside Railway's container.** Better approach: seed locally, then dump and restore.
+The seed scripts (`seed_jacobi.py`, `seed_jacobi_purchases.py`, `seed_jacobi_formulas.py`) read public data and populate indexes. Run them on Railway:
 
-**On your laptop:**
-
-```bash
-cd /home/alexis/costadvisor/backend
-source venv/bin/activate
-
-# Make sure your local DB has fresh data (run seed scripts against local Postgres)
+```
 python seed_jacobi.py
 python seed_jacobi_purchases.py
 python seed_jacobi_formulas.py
-
-# Dump your local DB
-pg_dump -h localhost -U costadvisor -d costadvisor \
-  --no-owner --no-acl --clean --if-exists \
-  > /tmp/costadvisor_seed.sql
 ```
 
-**Push to Railway's Postgres.** Get the connection details: in Railway, click the Postgres service → Connect tab → copy the "Postgres Connection URL" (looks like `postgresql://postgres:xxxxx@xxxxx.railway.app:1234/railway`).
+(If any of these read a local Excel file, commit the file to the repo first — it's public per your call.)
 
-```bash
-# Restore (replace with the URL from Railway Connect tab)
-psql 'postgresql://postgres:xxxxx@xxxxx.railway.app:1234/railway' < /tmp/costadvisor_seed.sql
-```
-
-**Verify:**
-- No errors during restore (warnings about "role does not exist" are fine — that's why we used `--no-owner`)
-- In Railway Postgres → Data tab, you should see rows in your tables
+**Verify:** Postgres → Data → indexes table has rows. Sign up as a test user later (Phase 14) and confirm you can see them.
 
 ---
 
-## Phase 7 — Google OAuth: add the production redirect URI (3 min)
+## Phase 9 — Google OAuth: production credentials (10 min)
 
-📋 Currently your OAuth client only allows `http://localhost:8000/auth/callback`. Production needs the deployed URL added.
+📋 The dev OAuth client has `localhost` redirect URIs. For production, **create a new client** rather than reusing dev — keeps prod secrets separate from a secret that's been on your laptop.
 
-1. Go to https://console.cloud.google.com/apis/credentials
-2. Click your OAuth 2.0 Client ID (the one whose ID matches your `GOOGLE_CLIENT_ID`)
-3. Under **Authorized redirect URIs** → **Add URI**:
-   - `https://api.yourdomain.com/auth/callback`
-   - **Also temporarily add** `https://<railway-generated-url>/auth/callback` so you can test before DNS propagates
-4. Under **Authorized JavaScript origins** → **Add URI**:
+1. https://console.cloud.google.com/apis/credentials → **Create Credentials → OAuth client ID → Web application**
+2. Name: `costadvisor-prod`
+3. **Authorized JavaScript origins:**
    - `https://yourdomain.com`
-5. **Save**
+4. **Authorized redirect URIs:**
+   - `https://api.yourdomain.com/auth/callback`
+5. Save → copy the new Client ID + Secret
+6. Paste them into Railway api **and** worker Variables (`GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`)
+7. Redeploy both services
 
-**Important:** Google OAuth changes can take up to 5 minutes to propagate. If your first login attempt gets `redirect_uri_mismatch`, wait and try again.
+OAuth changes can take up to 5 minutes to propagate.
+
+**Keep the dev OAuth client.** Different ID, different redirect — they coexist fine.
 
 ---
 
-## Phase 8 — Cloudflare Pages: deploy the frontend (10 min)
+## Phase 10 — Cloudflare Pages: frontend (10 min)
 
 📋 In Cloudflare Dashboard:
 
 1. **Workers & Pages → Create application → Pages → Connect to Git**
-2. Authorize Cloudflare to read your GitHub
-3. Pick the `costadvisor` repo
-4. Set up build:
+2. Authorize Cloudflare on GitHub
+3. Pick `costadvisor`
+4. Build:
    - **Project name:** `costadvisor`
    - **Production branch:** `main`
-   - **Framework preset:** Vite (auto-detected probably)
+   - **Framework preset:** Vite
    - **Build command:** `npm run build`
    - **Build output directory:** `dist`
    - **Root directory (advanced):** `frontend`
-5. **Environment variables (advanced):**
+5. **Environment variables:**
    - `VITE_API_BASE_URL` = `https://api.yourdomain.com`
+   - `VITE_SENTRY_DSN` = (filled in Phase 13, frontend Sentry project)
 6. **Save and Deploy**
 
-First build takes ~2 min. Cloudflare gives you a `costadvisor.pages.dev` URL.
-
-**Verify:**
-- Build succeeds
-- The pages.dev URL loads the React app
-- The login page renders correctly
-- DON'T try to log in yet — the OAuth redirect points at `api.yourdomain.com` which doesn't resolve until Phase 9
+**Verify:** the `*.pages.dev` URL loads. Don't try to log in yet — DNS first.
 
 ---
 
-## Phase 9 — DNS wiring (5 min + propagation)
+## Phase 11 — DNS wiring (5 min + propagation)
 
-📋 In Cloudflare → DNS → Records, add two records:
+📋 In Cloudflare → DNS → Records:
 
 | Type | Name | Target | Proxy |
 |---|---|---|---|
-| `CNAME` | `@` (root) | `costadvisor.pages.dev` | Proxied (orange cloud) |
-| `CNAME` | `api` | `costadvisor-api-production-xxxx.up.railway.app` | Proxied (orange cloud) |
+| `CNAME` | `@` | `costadvisor.pages.dev` | Proxied |
+| `CNAME` | `api` | `costadvisor-api-production-xxxx.up.railway.app` | Proxied |
 
-(Adjust the targets to your actual generated URLs.)
+Then in Railway → api service → **Settings → Networking → Custom Domain → Add `api.yourdomain.com`**. Railway issues a verification record if needed.
 
-**Important about the API CNAME and Railway:** Railway's free tier requires you to add the custom domain in Railway too. In Railway, go to the **api** service → **Settings → Networking → Custom Domain → Add Domain → `api.yourdomain.com`**. Railway will give you a verification record. If it asks for a CNAME target, that's the same Railway hostname you already used.
-
-For the root domain on Cloudflare Pages:
-- In Cloudflare Pages → your project → Custom domains → Set up custom domain → `yourdomain.com`
-- Cloudflare auto-handles this since the domain is in the same Cloudflare account
-
-DNS propagation usually completes in 1–5 minutes inside Cloudflare's network.
+In Cloudflare Pages → project → Custom domains → Set up custom domain → `yourdomain.com` (auto-handled).
 
 **Verify:**
-- `https://yourdomain.com` loads the React app
+- `https://yourdomain.com` loads
 - `https://api.yourdomain.com/health` returns `{"status":"ok"}`
-- Both have valid HTTPS certificates (Cloudflare auto-provisions)
+- Both have valid HTTPS
 
 ---
 
-## Phase 10 — Pre-warm the LLM cache (20 min)
+## Phase 12 — Backups: nightly dumps to Backblaze B2 (20 min)
 
-📋 This is the trick that makes the demo fully private and fast at $0/mo.
+📋 Railway backs up Postgres but you want your own copy you can restore from independently.
 
-### One-time setup on your laptop
+### 12a. Backblaze setup
 
-```bash
-# Install Ollama if you don't have it
-curl -fsSL https://ollama.com/install.sh | sh
+1. B2 → Buckets → Create Bucket: `costadvisor-backups`, **private**
+2. Lifecycle rules: keep newest 30 days, then delete
+3. App Keys → Add a new application key, **scope: this bucket only**, capabilities: `listFiles`, `readFiles`, `writeFiles`. Copy `keyID` and `applicationKey`
 
-# Start Ollama (leave running in a terminal)
-ollama serve
+### 12b. Backup task on the worker
 
-# In another terminal: pull the model
-ollama pull llama3.2:3b
+Add `backend/app/tasks/backup.py`:
+
+```python
+import subprocess, datetime, os, gnupg
+from celery import shared_task
+import b2sdk.v2 as b2
+
+@shared_task
+def nightly_backup():
+    ts = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    raw = f"/tmp/dump-{ts}.sql"
+    enc = f"{raw}.gpg"
+
+    subprocess.check_call([
+        "pg_dump", os.environ["DATABASE_URL"],
+        "--no-owner", "--no-acl", "-f", raw,
+    ])
+
+    gpg = gnupg.GPG()
+    with open(raw, "rb") as f:
+        gpg.encrypt_file(f, recipients=None, symmetric="AES256",
+                         passphrase=os.environ["BACKUP_PASSPHRASE"],
+                         output=enc)
+
+    info = b2.InMemoryAccountInfo()
+    api = b2.B2Api(info)
+    api.authorize_account("production", os.environ["B2_KEY_ID"], os.environ["B2_APP_KEY"])
+    bucket = api.get_bucket_by_name(os.environ["B2_BUCKET"])
+    bucket.upload_local_file(local_file=enc, file_name=f"dump-{ts}.sql.gpg")
+
+    os.remove(raw); os.remove(enc)
 ```
 
-The 3B model is ~2 GB on disk and runs decently on CPU. Chosen because it's small enough to be fast for the warm-up loop. You can use a bigger model if you want better output, but the cache key is hashed from the model name — **whatever you pull here MUST match `OLLAMA_MODEL` in Railway**.
+Schedule in `celeryconfig.py`:
 
-### Configure your local backend to write into Railway's Redis
-
-In `backend/.env` (your local file, never committed), temporarily add/change:
-
-```
-LLM_ENABLED=true
-OLLAMA_URL=http://localhost:11434
-OLLAMA_MODEL=llama3.2:3b
-REDIS_URL=<paste the Railway Redis URL from the Railway dashboard, "Connect" tab>
-```
-
-### Run the warm-up
-
-```bash
-# Restart your local backend so it picks up the new env vars
-cd /home/alexis/costadvisor
-./start.sh
+```python
+beat_schedule = {
+    "nightly-backup": {
+        "task": "app.tasks.backup.nightly_backup",
+        "schedule": crontab(hour=3, minute=0),  # 03:00 UTC
+    },
+    # ... existing entries
+}
 ```
 
-In a browser, open `http://localhost:5173`, log in via Google OAuth.
+Add to worker Variables in Railway:
+- `B2_KEY_ID`, `B2_APP_KEY`, `B2_BUCKET=costadvisor-backups`
+- `BACKUP_PASSPHRASE` — generate with `python -c "import secrets; print(secrets.token_urlsafe(32))"`. **Store this passphrase in your password manager. Without it the backups are unrecoverable.**
 
-In DevTools → Application → Cookies → http://localhost:5173, find the `ca_token` cookie and copy its **Value** (a long JWT string starting with `ey...`).
+Add `python-gnupg` and `b2sdk` to `requirements.txt`. The Dockerfile needs `gnupg` apt-installed.
 
-In a third terminal:
+### 12c. Test the restore — DO THIS, don't skip it
 
-```bash
-cd /home/alexis/costadvisor/backend
-source venv/bin/activate
-SESSION_TOKEN='paste-the-jwt-here' python scripts/warm_cache.py
-```
+Untested backups are a story you tell yourself. The restore drill:
 
-Watch the output. Every brief and index analysis will print `OK` or `FAIL`. First-time generations take ~10–20 sec each on CPU. Total warm-up time depends on how much data you have — could be 5–30 min.
+1. Wait for one nightly run, or trigger manually: `railway run python -c "from app.tasks.backup import nightly_backup; nightly_backup()"` on the worker
+2. From your laptop, download the latest dump from B2
+3. Decrypt: `gpg --decrypt --batch --passphrase $BACKUP_PASSPHRASE dump-*.sql.gpg > restored.sql`
+4. Spin up a throwaway local Postgres (`docker run --rm -e POSTGRES_PASSWORD=x -p 5433:5432 postgres:16`)
+5. `psql -h localhost -p 5433 -U postgres < restored.sql`
+6. Connect, count rows on a few key tables, confirm they match prod
 
-**Verify:**
-- Most lines print `OK`
-- A handful of `FAIL` lines for things with no data is normal (e.g., a cost model with no period data yet)
-- No tracebacks
-
-### Restore your local `.env`
-
-After warm-up completes, change `backend/.env` back to local settings:
-
-```
-LLM_ENABLED=true
-OLLAMA_URL=http://localhost:11434
-REDIS_URL=redis://localhost:6379/0
-```
-
-Restart your local backend so it stops poking at the Railway Redis.
+Schedule this drill on your calendar **monthly**.
 
 ---
 
-## Phase 11 — Production smoke test (10 min)
+## Phase 13 — Monitoring (15 min)
 
-📋 The whole point of this phase is to catch demo-breakers BEFORE the audience sees them. Do every step.
+📋 Two pieces: errors (Sentry) and uptime (UptimeRobot).
 
-1. **Open `https://yourdomain.com` in a fresh incognito window** (no cookies from prior testing)
-2. **Click Login.** Should redirect to Google's consent screen, then back to `https://yourdomain.com` logged in
-3. **Look at DevTools → Application → Cookies.** You should see `ca_token` set on `api.yourdomain.com`, with `Secure: true`, `SameSite: None`, `HttpOnly: true`
-4. **Refresh the page.** You should stay logged in (proves the cookie is being sent on subsequent requests)
-5. **Click through every screen** the demo will show. Specifically:
-   - Generate a brief — verify the narrative is the LLM-enhanced one (not the rule-based fallback). If it's the rule-based one, the cache miss happened, meaning your warm-up didn't cover this exact request → re-run warm-up against the same period selection
-   - Open a commodity index → click "AI analysis" → verify you get a real explanation, not "AI analysis is currently unavailable"
-6. **Log in as a SECOND Google account** in another incognito window. Verify you don't see the first user's data. (This is your minimum viable tenancy test.)
-7. **Log out, log back in.** Verify the session cycle works.
+### Sentry
 
-If any of this fails, see the **Troubleshooting** section at the bottom.
+1. sentry.io → New Project → Python/FastAPI → name `costadvisor-backend` → copy DSN
+2. New Project → React → name `costadvisor-frontend` → copy DSN
+3. Backend: `pip install sentry-sdk[fastapi]`, add to `backend/app/main.py` near startup:
+
+   ```python
+   import sentry_sdk
+   if settings.environment == "production":
+       sentry_sdk.init(
+           dsn=settings.sentry_dsn,
+           traces_sample_rate=0.1,
+           send_default_pii=False,
+       )
+   ```
+
+   Add a middleware that tags events with `user.email` (so you can find a customer's session when they email support).
+4. Frontend: `npm i @sentry/react`, init in `frontend/src/main.jsx`. Skip in dev.
+5. Set `SENTRY_DSN` (Railway) and `VITE_SENTRY_DSN` (Cloudflare Pages). Redeploy both.
+6. Trigger a test error from each side. Confirm it shows up in Sentry within a minute.
+
+### UptimeRobot
+
+1. uptimerobot.com → Add New Monitor
+2. Monitor type: HTTPS
+3. URL: `https://api.yourdomain.com/health`
+4. Interval: 5 min
+5. Alert contact: your email + (optional) a phone for SMS
+6. Add a second monitor for `https://yourdomain.com` (the frontend)
+
+**Verify:** both monitors green within 10 min.
 
 ---
 
-## Phase 12 — Demo day morning checklist
+## Phase 14 — Production smoke test (20 min)
 
-📋 Run through this an hour before the presentation:
+📋 Everything below must pass before you tell a single customer to sign up.
 
-- [ ] Visit `https://yourdomain.com/health`-equivalent (the API one): `https://api.yourdomain.com/health`. Should be `{"status":"ok"}`.
-- [ ] Log in fresh (incognito window). Should succeed without prompts beyond Google's consent.
-- [ ] Click through the exact demo flow you'll show. Every LLM response should appear instantly (cache hit). Any slow / fallback response = cache miss → bad sign.
-- [ ] Check Railway dashboard: api service "Active", worker service "Active", no recent error spikes.
-- [ ] Confirm your demo Google account is still logged in, OR have the credentials handy.
-- [ ] Have a backup browser tab open with the local dev environment running, just in case.
-- [ ] Make sure your laptop is on power, wifi is solid, Do Not Disturb is on.
+### 14a. Solo flow
+
+1. Open `https://yourdomain.com` in a fresh incognito window
+2. Click Login → Google consent → land back logged in
+3. DevTools → Application → Cookies: `ca_token` on `api.yourdomain.com`, `Secure: true`, `SameSite: None`, `HttpOnly: true`
+4. Refresh — still logged in
+5. Click through every screen. Generate a brief, request an AI analysis on an index. **First-time generations should take ~5–15 sec on Hetzner CPU and return a real LLM narrative, not the rule-based fallback.** Subsequent identical requests should be near-instant (cache hit).
+
+### 14b. Tenancy isolation (the critical one)
+
+1. Sign up as a SECOND Google account in a separate incognito
+2. As user B, try to load user A's resources by guessing IDs (or by reading them from A's URL bar)
+3. Expected: 404 every time. **If you get user A's data back, stop and re-do Phase 1a/1b before going live.**
+
+### 14c. Account deletion
+
+1. As user B, hit the delete-account flow
+2. Confirm: logged out, B's user row marked deleted, B's team/data gone (or membership removed if team had others)
+3. Try to log back in as B — should work (creates a new account; the old one is tombstoned)
+
+### 14d. Rate limiting
+
+1. Hit the login endpoint 15 times in a minute from one IP
+2. Expect 429 starting around the 10th
+3. Same for an LLM endpoint after ~30 calls/min
+
+### 14e. Backup + restore drill
+
+Already covered in Phase 12c. Confirm you've actually run it before going live.
+
+### 14f. Observability
+
+- Trigger a 500 (e.g., POST garbage to a JSON endpoint) → confirm Sentry receives it
+- Stop the api service in Railway briefly → confirm UptimeRobot alerts within 10 min → restart
 
 ---
 
-## Post-demo TODO (do these the week after)
+## Phase 15 — Launch checklist + first-week ops (ongoing)
 
-These are explicitly out of scope for the demo but important before any real customer touches the system. Listing them so they don't fall on the floor:
+📋 Before announcing to your first customer:
 
-1. **Tenancy audit.** Walk every query in `backend/app/routers/` and `backend/app/services/` and verify each touches tenant data only after filtering by `team_id` or `user_id`. There's no automated test for this — it's read-the-code work. Then add a few integration tests that log in as Tenant A and try to access Tenant B's resources (should 403 / 404, not return data).
-2. **Postgres Row-Level Security (RLS) as a backstop.** Even after the audit, add RLS policies on the team-scoped tables so a future query bug can't accidentally leak across tenants. This is the difference between "we tried to be careful" and "the database physically refuses to leak."
-3. **Real backups.** Railway backs up Postgres but you want your own copy for licensed data. Set up a nightly `pg_dump` to a Backblaze B2 bucket (encrypted), and **test the restore process** at least once.
-4. **Audit log.** You already have an `audit_log` model. Make sure every write that touches tenant data goes through `log_event()`.
-5. **Decide self-hosted SLM strategy.** If the LLM features are going to be load-bearing, provision a Hetzner CCX13 (~$13/mo) running Ollama, set `LLM_ENABLED=true` and `OLLAMA_URL=http://<that-server>:11434`. Use a Tailscale tunnel between Railway and the Hetzner box so the Ollama port isn't on the public internet.
-6. **Move secrets out of `backend/.env` on your laptop** to a password manager. Keep `.env` for placeholder values only.
-7. **Rotate the Google OAuth client secret** and the JWT secret as a hygienic baseline. Rotation is free, hygiene matters.
-8. **Daily scraping schedule.** Currently set to weekly Mondays in `celeryconfig.py`. Change `crontab(hour=6, minute=0, day_of_week=1)` → `crontab(hour=6, minute=0)` (every day at 06:00) once the worker is stable.
-9. **Monitoring.** Add UptimeRobot (free) pinging `https://api.yourdomain.com/health` every 5 min. Add Sentry (free hobby tier) for error tracking once you have actual users.
+- [ ] All of Phase 14 passed
+- [ ] Privacy policy + Terms live and linked
+- [ ] Support email forwards to a real inbox you check daily
+- [ ] Backups have run at least once and you've decrypted one to confirm
+- [ ] Sentry receiving events from both backend and frontend
+- [ ] UptimeRobot has been green for 24h
+- [ ] Secrets in your password manager: `JWT_SECRET`, `GOOGLE_CLIENT_SECRET`, `BACKUP_PASSPHRASE`, B2 keys, Railway/Cloudflare/Hetzner/Tailscale account creds
+
+First-week ops cadence:
+- **Daily:** glance at Sentry (any new error groups?), Railway logs (anything weird?), Hetzner box (`tailscale status`, `systemctl status ollama`)
+- **Weekly:** check B2 has a fresh backup per day. Check Postgres size growth.
+- **Monthly:** restore drill (Phase 12c). Rotate any secret that's been touched by anyone besides you.
 
 ---
 
 ## Environment variable reference
 
-Complete list of every env var the app reads, where to set it, and what it should be in each environment.
-
-| Variable | Local dev (`backend/.env`) | Production (Railway) | Notes |
+| Variable | Local dev (`backend/.env`) | Production | Notes |
 |---|---|---|---|
-| `ENVIRONMENT` | `development` (or unset) | `production` | Controls cookie security flags |
-| `DATABASE_URL` | local Postgres URL | `${{Postgres.DATABASE_URL}}` | Railway reference variable |
+| `ENVIRONMENT` | `development` | `production` | Cookie security flags |
+| `DATABASE_URL` | local Postgres URL | `${{Postgres.DATABASE_URL}}` | Railway reference |
 | `REDIS_URL` | `redis://localhost:6379/0` | `${{Redis.REDIS_URL}}` | |
-| `GOOGLE_CLIENT_ID` | from Google Console | same | |
-| `GOOGLE_CLIENT_SECRET` | from Google Console | same | |
-| `JWT_SECRET` | any random string | `secrets.token_urlsafe(48)` output | NEVER reuse the dev one |
+| `GOOGLE_CLIENT_ID` | dev client | **prod client (separate)** | Phase 9 |
+| `GOOGLE_CLIENT_SECRET` | dev secret | **prod secret** | |
+| `JWT_SECRET` | any random | `secrets.token_urlsafe(48)` | Never reuse dev |
 | `JWT_ALGORITHM` | `HS256` | `HS256` | |
 | `JWT_EXPIRY_HOURS` | `72` | `72` | |
-| `APP_URL` | `http://localhost:5173` | `https://yourdomain.com` | Used for CORS + OAuth redirect |
-| `API_URL` | `http://localhost:8000` | `https://api.yourdomain.com` | Used to build OAuth callback URL |
-| `LLM_ENABLED` | `true` | `false` | False = cache-only mode for demo |
-| `OLLAMA_URL` | `http://localhost:11434` | `http://disabled` | Never called when LLM_ENABLED=false |
-| `OLLAMA_MODEL` | `llama3.2:3b` | `llama3.2:3b` | MUST match between dev and prod for cache keys to align |
+| `APP_URL` | `http://localhost:5173` | `https://yourdomain.com` | CORS + OAuth redirect |
+| `API_URL` | `http://localhost:8000` | `https://api.yourdomain.com` | OAuth callback |
+| `LLM_ENABLED` | `true` | `true` | Cache-only fallback knob still exists |
+| `OLLAMA_URL` | `http://localhost:11434` | `http://<tailscale-ip>:11434` | Hetzner over Tailscale |
+| `OLLAMA_MODEL` | `llama3.2:3b` | `llama3.2:3b` | Must match |
 | `OLLAMA_TIMEOUT` | `60` | `60` | |
-| `EIA_API_KEY` | optional | optional | EIA scraper, demo doesn't need it |
-| `FRED_API_KEY` | optional | optional | FRED scraper, demo doesn't need it |
-| `VITE_API_BASE_URL` (frontend) | unset (uses Vite proxy) | `https://api.yourdomain.com` (Cloudflare Pages env) | Set in Pages dashboard |
+| `TAILSCALE_AUTHKEY` | unset | reusable ephemeral key | Phase 6a |
+| `SENTRY_DSN` | unset | from Sentry | Phase 13 |
+| `SUPPORT_EMAIL` | `alexis@staminachem.com` | same | |
+| `ALLOW_SIGNUP` | `true` | `true` | Flip to `false` to gate later |
+| `B2_KEY_ID` | unset | from B2 | Worker only |
+| `B2_APP_KEY` | unset | from B2 | Worker only |
+| `B2_BUCKET` | unset | `costadvisor-backups` | Worker only |
+| `BACKUP_PASSPHRASE` | unset | random 32-byte | Worker only — store in password manager |
+| `EIA_API_KEY`, `FRED_API_KEY` | optional | optional | Index scrapers |
+| `VITE_API_BASE_URL` (frontend) | unset (Vite proxy) | `https://api.yourdomain.com` | Cloudflare Pages |
+| `VITE_SENTRY_DSN` (frontend) | unset | from Sentry | Cloudflare Pages |
 
 ---
 
 ## Troubleshooting
 
 **Login redirects to Google then back to a 400 / "redirect_uri_mismatch"**
-The redirect URI you registered in Google Console doesn't exactly match what the app sent. Check exact protocol (`https://`), exact domain, no trailing slash. Add the missing variant in Google Console and wait 5 min for propagation.
+The redirect URI registered in Google Console doesn't exactly match what the app sent. Check protocol, domain, no trailing slash. Wait 5 min after edits.
 
-**Login appears to succeed (Google consent screen → back to your app), but you're immediately redirected to login again**
-The cookie was set but isn't being sent on subsequent requests. Causes:
-- `ENVIRONMENT` not set to `production` in Railway → cookie has `secure=False` → browser drops it on HTTPS
-- Frontend and API are on completely different parent domains AND your CORS / cookie config doesn't allow cross-site cookies. With the current code, `samesite=None + secure=True` is set in production, which works cross-site.
-- `withCredentials: true` missing on the axios client (already set in `frontend/src/api.js`)
+**Login appears to succeed but user is immediately redirected back to login**
+Cookie set but not sent on subsequent requests. Causes: `ENVIRONMENT` not `production` → cookie not `Secure` → browser drops it on HTTPS. Or `APP_URL` mismatch → CORS rejection.
 
 **CORS error in browser console**
-`APP_URL` env var on the API service doesn't exactly match the frontend's actual URL. Must include protocol, no trailing slash. Update in Railway, redeploy.
+`APP_URL` env on api doesn't exactly match the frontend URL. Update Railway, redeploy.
+
+**API responds with rule-based fallback instead of LLM**
+- Check Railway api logs for `OLLAMA_URL` connection errors
+- From a Railway shell: `curl http://<tailscale-ip>:11434/api/tags` — does it return the model?
+- On Hetzner: `tailscale status` — is the railway-api node listed?
+- `systemctl status ollama` — is the daemon up?
+
+**RLS blocking everything with "permission denied" or no rows returned where there should be some**
+The `SET LOCAL app.current_team_id` listener isn't firing, or the value is wrong. Check `backend/app/db.py`. In Postgres: `SHOW app.current_team_id;` inside a transaction to debug.
+
+**Cross-tenant test fails (user B can read user A's data)**
+Real leak. Re-do Phase 1a for the affected router. Don't deploy until green.
 
 **Build fails on Railway with "No such file requirements.txt"**
-Service Root Directory not set to `backend`. Fix in Settings → Source.
+Service Root Directory not set to `backend`.
 
-**Worker service crashes with "ModuleNotFoundError: No module named 'celeryconfig'"**
-Worker is being run from the wrong directory. Confirm Root Directory = `backend`. The Dockerfile sets `WORKDIR /app` and copies the backend contents into it, so `celeryconfig` lives at `/app/celeryconfig.py` and is importable.
+**Tailscale fails to come up inside Railway container**
+Auth key wrong, expired, or not reusable. Generate a new reusable+ephemeral key in Tailscale admin and update `TAILSCALE_AUTHKEY`.
 
-**LLM responses in production are the rule-based fallback, not the cached LLM ones**
-Cache miss. Either:
-- Warm-up didn't run successfully (re-check `warm_cache.py` output)
-- `OLLAMA_MODEL` differs between warm-up and Railway (cache key includes the model name)
-- Redis was emptied / TTL expired (cache TTL is 7 days)
-- Warm-up wrote to a *different* Redis than Railway uses (double-check the `REDIS_URL` you set during warm-up)
+**Page reload on `/admin` returns 404**
+SPA fallback missing. Verify `frontend/public/_redirects` made it into the build.
 
-**Page reload on `/admin` returns a 404**
-SPA fallback not configured on Cloudflare Pages. The `frontend/public/_redirects` file should fix this — verify it made it into the build.
-
-**`alembic upgrade head` fails with "could not connect to server"**
-You're running it from your laptop without the right `DATABASE_URL`. Easiest fix: run via Railway's "Run a command" UI on the api service, or use `railway run alembic upgrade head` after `railway link`.
+**Backup task fails with "gnupg not found"**
+`gnupg` apt package not in the Dockerfile. Add `RUN apt-get update && apt-get install -y gnupg`.
 
 ---
 
 ## What this runbook deliberately doesn't cover
 
-- **Custom CI/CD.** Railway auto-deploys on push to `main`. That's all you need for now.
-- **Staging environments.** One env until there's a reason for two.
-- **Containerized frontend.** Cloudflare Pages builds React directly; you don't need `Dockerfile.frontend` for production. It can stay in the repo for docker-compose dev workflows.
-- **Multi-region deployment.** Railway is single-region. Latency from Canada/EU to Railway's US-East is ~100ms. Acceptable for a demo. For real users worldwide, that's a Phase 2 migration to Fly.io or similar.
-- **Blue/green deploys, zero-downtime migrations.** Deploys cause a ~5 sec gap. Schedule deploys when no demo is running.
+POC-grade, not enterprise. The following are explicit non-goals — call them out to anyone who asks if this is "production-ready":
+
+- **CI/CD beyond auto-deploy.** Railway auto-deploys on push to `main`. No staging environment. No automated test gate before deploy (your local pytest run is the gate).
+- **Multi-region.** Railway is single-region (US-East). Hetzner is single-region (match it). EU customers see ~100ms extra latency.
+- **Blue/green deploys, zero-downtime migrations.** Deploys cause a ~5 sec gap.
+- **SOC2, HIPAA, PCI.** Not even close.
+- **Multi-node Postgres / read replicas.** Single Railway Postgres instance.
+- **Ollama HA.** One Hetzner box. If it dies, LLM features go down (the rule-based fallback still works because `LLM_ENABLED` would need to be flipped to keep the API up — consider making the fallback automatic on Ollama timeout if this matters).
+- **Customer data export.** Add an "export my data" endpoint when the first customer asks.
+- **Email notifications.** No transactional email is wired up. If the product needs it (password reset, alerts), add Postmark or Resend later.
+- **Penetration test.** Worth doing before more than ~10 paying customers.
 
 ---
 
-If something in this runbook doesn't match what you find in the dashboards (Railway/Cloudflare UIs change), search their docs for the closest equivalent setting. The concepts are stable, the buttons move.
+If something in this runbook doesn't match what you find in the dashboards (Railway/Cloudflare/Hetzner UIs change), search their docs for the closest equivalent setting. The concepts are stable, the buttons move.

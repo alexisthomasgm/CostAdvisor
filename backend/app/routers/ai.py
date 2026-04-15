@@ -1,8 +1,9 @@
 """AI-powered analysis endpoints (Ollama local LLM)."""
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
 
+from app.rate_limit import limiter
 from app.routers.auth import get_current_user
 from app.models.user import User
 from app.services.ollama import ollama_generate
@@ -56,7 +57,9 @@ class IndexAnalysisResponse(BaseModel):
 # --- Endpoint ---
 
 @router.post("/index-analysis", response_model=IndexAnalysisResponse)
+@limiter.limit("30/minute")
 async def index_analysis(
+    request: Request,
     body: IndexAnalysisRequest,
     current_user: User = Depends(get_current_user),
 ):

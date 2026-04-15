@@ -58,30 +58,53 @@ def _get_period_formula(cost_model: CostModel, year: int, quarter: int):
 
 
 def _available_index_range(db: Session, cost_model: CostModel):
-    """Find the min/max (year, quarter) of index data available for this model's components."""
+    """Find the min/max (year, quarter) across both index data and pricing data
+    for this cost model, so the date range reflects all available information."""
     from app.models.index_data import IndexValue
+    from sqlalchemy import func
 
-    # Gather commodity_ids from ALL formula versions (union)
+    min_yq, max_yq = None, None
+
+    # Check index data for this model's commodity components
     commodity_ids = set()
     for fv in cost_model.formula_versions:
         for c in fv.components:
             if c.commodity_id:
                 commodity_ids.add(c.commodity_id)
 
-    if not commodity_ids:
+    if commodity_ids:
+        row = db.query(
+            func.min(IndexValue.year * 10 + IndexValue.quarter),
+            func.max(IndexValue.year * 10 + IndexValue.quarter),
+        ).filter(IndexValue.commodity_id.in_(commodity_ids)).first()
+        if row and row[0] is not None:
+            min_yq, max_yq = row
+
+    # Check actual pricing data for this cost model
+    price_row = db.query(
+        func.min(ActualPrice.year * 10 + ActualPrice.quarter),
+        func.max(ActualPrice.year * 10 + ActualPrice.quarter),
+    ).filter(ActualPrice.cost_model_id == cost_model.id).first()
+
+    if price_row and price_row[0] is not None:
+        p_min, p_max = price_row
+        if min_yq is None:
+            min_yq, max_yq = p_min, p_max
+        else:
+            min_yq = min(min_yq, p_min)
+            max_yq = max(max_yq, p_max)
+
+    if min_yq is None:
         return None, None, None, None
 
-    from sqlalchemy import func
-    row = db.query(
-        func.min(IndexValue.year * 10 + IndexValue.quarter),
-        func.max(IndexValue.year * 10 + IndexValue.quarter),
-    ).filter(IndexValue.commodity_id.in_(commodity_ids)).first()
-
-    if not row or row[0] is None:
-        return None, None, None, None
-
-    min_yq, max_yq = row
     return min_yq // 10, min_yq % 10, max_yq // 10, max_yq % 10
+
+
+def _current_quarter() -> tuple[int, int]:
+    """Return (year, quarter) for today."""
+    from datetime import date
+    today = date.today()
+    return today.year, (today.month - 1) // 3 + 1
 
 
 def _default_period_range(db: Session, cost_model: CostModel):
@@ -89,10 +112,11 @@ def _default_period_range(db: Session, cost_model: CostModel):
     Defaults to the last 8 quarters of available data."""
     min_y, min_q, max_y, max_q = _available_index_range(db, cost_model)
     if max_y is None:
+        now_y, now_q = _current_quarter()
         fv = cost_model.current_formula
         if not fv:
-            return 2023, 1, 2025, 4
-        return max(fv.base_year - 1, 2020), 1, fv.base_year + 2, 4
+            return now_y - 2, 1, now_y, now_q
+        return max(fv.base_year - 1, 2020), 1, now_y, now_q
 
     # Go 7 quarters back from the latest available quarter (8 quarters total)
     to_year, to_quarter = max_y, max_q
@@ -134,6 +158,21 @@ def _output_ccy(model_ccy: str, display_ccy: str | None) -> str:
 
 def _output_unit(model_unit: str, display_unit: str | None) -> str:
     return display_unit if display_unit else model_unit
+
+
+# ── Base-price resolution ─────────────────────────────────────
+
+def _effective_base_price(db: Session, cost_model_id, fv) -> float:
+    """Return the actual price for the formula's base period if one exists,
+    otherwise fall back to the manually-entered base_price on the formula version."""
+    actual = db.query(ActualPrice.price).filter(
+        ActualPrice.cost_model_id == cost_model_id,
+        ActualPrice.year == fv.base_year,
+        ActualPrice.quarter == fv.base_quarter,
+    ).scalar()
+    if actual is not None:
+        return float(actual)
+    return float(fv.base_price)
 
 
 # ── Margin helpers ─────────────────────────────────────────────
@@ -188,7 +227,7 @@ def calculate_should_cost(
             currency=cost_model.currency, unit=cost_model.product.unit,
         )
 
-    base_price = float(fv.base_price)
+    base_price = _effective_base_price(db, cost_model.id, fv)
     region = cost_model.region
     ref_year = fv.base_year
     ref_quarter = fv.base_quarter
@@ -240,7 +279,7 @@ def calculate_evolution(
             periods=[],
         )
 
-    base_price = float(fv.base_price)
+    base_price = _effective_base_price(db, cost_model.id, fv)
     region = cost_model.region
 
     ref_year = request.reference_year or fv.base_year
@@ -288,7 +327,7 @@ def calculate_evolution(
     for year, quarter, month, label in periods:
         # Period-aware: get the formula for this specific period
         period_fv = fv if use_active else _get_period_formula(cost_model, year, quarter)
-        period_base_price = float(period_fv.base_price)
+        period_base_price = _effective_base_price(db, cost_model.id, period_fv)
         period_ref_year = period_fv.base_year
         period_ref_quarter = period_fv.base_quarter
 
@@ -381,7 +420,7 @@ def calculate_squeeze(
             periods=[], cumulative_impact=0, total_volume=0,
         )
 
-    base_price = float(fv.base_price)
+    base_price = _effective_base_price(db, cost_model.id, fv)
     region = cost_model.region
     ref_year = request.reference_year or fv.base_year
     ref_quarter = request.reference_quarter or fv.base_quarter
@@ -417,7 +456,7 @@ def calculate_squeeze(
     for year, quarter, month, label in periods:
         # Period-aware formula selection
         period_fv = _get_period_formula(cost_model, year, quarter)
-        period_base_price = float(period_fv.base_price)
+        period_base_price = _effective_base_price(db, cost_model.id, period_fv)
         period_ref_year = period_fv.base_year
         period_ref_quarter = period_fv.base_quarter
 
@@ -506,7 +545,7 @@ def calculate_brief(
             drivers=[],
         )
 
-    base_price = float(fv.base_price)
+    base_price = _effective_base_price(db, cost_model.id, fv)
     region = cost_model.region
     ref_year = fv.base_year
     ref_quarter = fv.base_quarter
@@ -678,7 +717,7 @@ def calculate_price_change(
 
     # Use the to-period formula for the analysis
     fv = to_fv
-    base_price = float(fv.base_price)
+    base_price = _effective_base_price(db, cost_model.id, fv)
     region = cost_model.region
 
     # Compute margin weight

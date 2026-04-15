@@ -13,6 +13,7 @@ from app.models.index_data import (
 from app.models.cost_model import CostModel, FormulaVersion, FormulaComponent
 from app.models.product import Product
 from app.models.supplier import Supplier
+from app.models.team import TeamMembership
 from app.routers.auth import get_current_user
 from app.schemas.index_data import (
     CommodityIndexOut, IndexValueOut,
@@ -33,8 +34,22 @@ def require_super_admin(user: User):
         raise HTTPException(status_code=403, detail="Super admin required")
 
 
+def require_team_access(db: Session, user: User, team_id: uuid.UUID):
+    if user.is_super_admin:
+        return
+    membership = db.query(TeamMembership).filter(
+        TeamMembership.user_id == user.id,
+        TeamMembership.team_id == team_id,
+    ).first()
+    if not membership:
+        raise HTTPException(status_code=403, detail="Not a member of this team")
+
+
 @router.get("/", response_model=list[CommodityIndexOut])
-def list_commodities(db: Session = Depends(get_db)):
+def list_commodities(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     return db.query(CommodityIndex).order_by(CommodityIndex.name).all()
 
 
@@ -54,6 +69,7 @@ def get_index_values(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    require_team_access(db, current_user, team_id)
     # Resolve commodity IDs for product/supplier filter
     commodity_ids = None
     if product_id or supplier_id:
@@ -131,6 +147,7 @@ async def upload_index_overrides(
     current_user: User = Depends(get_current_user),
 ):
     """Upload team-specific index overrides."""
+    require_team_access(db, current_user, team_id)
     content = await file.read()
     filename = file.filename or "upload"
     rows = parse_index_upload(content, filename)
@@ -185,6 +202,7 @@ def cell_override(
     current_user: User = Depends(get_current_user),
 ):
     """Upsert a single cell override. Returns the updated enriched IndexValueOut."""
+    require_team_access(db, current_user, body.team_id)
     # Verify commodity exists
     commodity = db.query(CommodityIndex).filter(
         CommodityIndex.id == body.commodity_id
@@ -258,6 +276,7 @@ def bulk_override(
     current_user: User = Depends(get_current_user),
 ):
     """Apply a value to multiple periods for a commodity+region."""
+    require_team_access(db, current_user, body.team_id)
     commodity = db.query(CommodityIndex).filter(
         CommodityIndex.id == body.commodity_id
     ).first()
@@ -318,6 +337,7 @@ def delete_overrides_bulk(
     current_user: User = Depends(get_current_user),
 ):
     """Reset overrides. With year+quarter: single cell. Without: all for commodity+region+team."""
+    require_team_access(db, current_user, team_id)
     query = db.query(IndexOverride).filter(
         IndexOverride.team_id == team_id,
         IndexOverride.commodity_id == commodity_id,
@@ -349,6 +369,15 @@ def delete_override(
     override = db.query(IndexOverride).filter(IndexOverride.id == override_id).first()
     if not override:
         raise HTTPException(status_code=404, detail="Override not found")
+    require_team_access(db, current_user, override.team_id)
+    log_event(db, override.team_id, current_user.id, "delete", "index_override", str(override_id),
+              previous_value={
+                  "commodity_id": override.commodity_id,
+                  "region": override.region,
+                  "year": override.year,
+                  "quarter": override.quarter,
+                  "value": float(override.value) if override.value is not None else None,
+              })
     db.delete(override)
     db.commit()
     return {"status": "deleted"}
@@ -364,6 +393,7 @@ def list_team_sources(
     current_user: User = Depends(get_current_user),
 ):
     """List all configured index sources for a team, enriched with commodity name and scrape status."""
+    require_team_access(db, current_user, team_id)
     sources = (
         db.query(TeamIndexSource)
         .filter(TeamIndexSource.team_id == team_id)
@@ -422,6 +452,7 @@ async def create_or_update_team_source(
     clears old overrides, populates all returned periods, interpolates gaps,
     and blanks periods outside the new source's range.
     """
+    require_team_access(db, current_user, body.team_id)
     if body.source_type == "scrape_url" and not body.scrape_url:
         raise HTTPException(
             status_code=422, detail="scrape_url required when source_type is scrape_url"
@@ -494,6 +525,7 @@ def delete_team_source(
     source = db.query(TeamIndexSource).filter(TeamIndexSource.id == source_id).first()
     if not source:
         raise HTTPException(status_code=404, detail="Source not found")
+    require_team_access(db, current_user, source.team_id)
     db.query(IndexOverride).filter(
         IndexOverride.team_id == source.team_id,
         IndexOverride.commodity_id == source.commodity_id,
@@ -505,7 +537,10 @@ def delete_team_source(
 
 
 @router.get("/detect-source")
-def detect_source(url: str = Query(...)):
+def detect_source(
+    url: str = Query(...),
+    current_user: User = Depends(get_current_user),
+):
     """Detect the source type for a URL (e.g. INSEE IDBANK detection)."""
     source_type, idbank = detect_source_type(url)
     return {"detected_source": source_type, "idbank": idbank}
@@ -521,6 +556,7 @@ async def scrape_now(
     source = db.query(TeamIndexSource).filter(TeamIndexSource.id == source_id).first()
     if not source:
         raise HTTPException(status_code=404, detail="Source not found")
+    require_team_access(db, current_user, source.team_id)
     if source.source_type != "scrape_url":
         raise HTTPException(status_code=400, detail="Source is not a scrape_url type")
     if not source.scrape_url:
@@ -625,6 +661,14 @@ async def _scrape_and_replace_overrides(
                 source_file=f"scrape:{source.scrape_url}",
             ))
 
+    log_event(db, source.team_id, current_user.id, "scrape", "team_index_source", str(source.id),
+              new_value={
+                  "scrape_url": source.scrape_url,
+                  "commodity_id": source.commodity_id,
+                  "region": source.region,
+                  "points_written": len(filled),
+                  "latest_value": latest_value,
+              })
     db.commit()
     return latest_value, detected
 
@@ -666,6 +710,7 @@ def get_filter_options(
     current_user: User = Depends(get_current_user),
 ):
     """Return filter dropdown options for the indexes page."""
+    require_team_access(db, current_user, team_id)
     products = (
         db.query(Product.id, Product.name)
         .filter(Product.team_id == team_id)
@@ -709,6 +754,7 @@ def get_index_impact(
     current_user: User = Depends(get_current_user),
 ):
     """Get the portfolio impact of an index: which products use it and how much it's changed."""
+    require_team_access(db, current_user, team_id)
     from app.services.data_resolver import get_single_index_value
 
     commodity = db.query(CommodityIndex).filter(CommodityIndex.id == commodity_id).first()

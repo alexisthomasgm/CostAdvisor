@@ -98,3 +98,9 @@ class FREDIndustrialProductionScraper(FREDScraper):
     """Industrial Production Index, total (monthly, index 2017=100)."""
     commodity_name = "Industrial Production USA"
     SERIES_ID = "INDPRO"
+
+
+class FREDPPIChlorineScraper(FREDScraper):
+    """PPI: Alkalies and chlorine (monthly, index 1982=100)."""
+    commodity_name = "PPI Chlorine USA"
+    SERIES_ID = "WPU061303"

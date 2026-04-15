@@ -1,6 +1,7 @@
 import { Routes, Route, Navigate } from 'react-router-dom';
 import ProtectedRoute from './ProtectedRoute';
 import Navbar from './components/Navbar';
+import Footer from './components/Footer';
 import ImpersonationBar from './components/ImpersonationBar';
 import Login from './pages/Login';
 import CostModelBuilder from './pages/CostModelBuilder';
@@ -15,6 +16,8 @@ import SupplierPurchases from './pages/SupplierPurchases';
 import Products from './pages/Products';
 import Admin from './pages/Admin';
 import Team from './pages/Team';
+import Privacy from './pages/Privacy';
+import Terms from './pages/Terms';
 import { useAuth } from './AuthContext';
 
 export default function App() {
@@ -25,6 +28,8 @@ export default function App() {
       {user && <Navbar />}
       <Routes>
         <Route path="/login" element={<Login />} />
+        <Route path="/privacy" element={<Privacy />} />
+        <Route path="/terms" element={<Terms />} />
         <Route element={<ProtectedRoute />}>
           <Route path="/" element={<Navigate to="/dashboard" replace />} />
           <Route path="/cost-models/new" element={<CostModelBuilder />} />
@@ -43,6 +48,7 @@ export default function App() {
         </Route>
       </Routes>
       {user && <ImpersonationBar />}
+      <Footer />
     </>
   );
 }

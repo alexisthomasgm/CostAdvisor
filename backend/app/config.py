@@ -25,6 +25,13 @@ class Settings(BaseSettings):
     # Redis
     redis_url: str = "redis://localhost:6379/0"
 
+    # Support + signup
+    support_email: str = "alexis@staminachem.com"
+    allow_signup: bool = True  # Flip to false to restrict to existing users only
+
+    # Observability (wired in Phase 13)
+    sentry_dsn: str = ""
+
     # EIA (Energy Information Administration) API key for oil/gas scraping
     eia_api_key: str = ""
 

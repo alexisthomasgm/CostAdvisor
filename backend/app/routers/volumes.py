@@ -111,6 +111,7 @@ def update_volume(
         ActualVolume.quarter == quarter,
     ).first()
 
+    previous = {"volume": float(existing.volume), "unit": existing.unit} if existing else None
     if existing:
         existing.volume = data.volume
         existing.unit = data.unit
@@ -126,6 +127,9 @@ def update_volume(
         )
         db.add(existing)
 
+    log_event(db, cm.team_id, current_user.id, "update", "actual_volume", str(cost_model_id),
+              previous_value={"year": year, "quarter": quarter, **previous} if previous else None,
+              new_value={"year": year, "quarter": quarter, "volume": float(data.volume), "unit": data.unit})
     db.commit()
     db.refresh(existing)
     return existing
@@ -153,6 +157,8 @@ def delete_volume(
     if not vol:
         raise HTTPException(status_code=404, detail="Volume not found")
 
+    log_event(db, cm.team_id, current_user.id, "delete", "actual_volume", str(cost_model_id),
+              previous_value={"year": year, "quarter": quarter, "volume": float(vol.volume), "unit": vol.unit})
     db.delete(vol)
     db.commit()
     return {"status": "deleted"}

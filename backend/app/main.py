@@ -1,13 +1,20 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
+from slowapi import _rate_limit_exceeded_handler
 
 from app.config import get_settings
 from app.database import engine, Base
+from app.observability import init_sentry
+from app.rate_limit import limiter
+
+init_sentry()
 from app.routers import (
     auth, teams, products, cost_models, indexes, prices,
     volumes, costing, scenarios, suppliers, chemical_families,
-    fx_rates, audit, portfolio, admin, ai,
+    fx_rates, audit, portfolio, admin, ai, account,
 )
 
 
@@ -23,6 +30,10 @@ app = FastAPI(
 )
 
 settings = get_settings()
+
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
@@ -49,6 +60,7 @@ app.include_router(audit.router, prefix="/api/audit", tags=["audit"])
 app.include_router(portfolio.router, prefix="/api/portfolio", tags=["portfolio"])
 app.include_router(admin.router, prefix="/api/admin", tags=["admin"])
 app.include_router(ai.router, prefix="/api/ai", tags=["ai"])
+app.include_router(account.router, prefix="/api/account", tags=["account"])
 
 
 @app.get("/health")
