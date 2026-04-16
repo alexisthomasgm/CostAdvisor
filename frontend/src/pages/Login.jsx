@@ -24,7 +24,7 @@ export default function Login() {
         </p>
       </div>
       <a
-        href="/auth/login"
+        href={`${import.meta.env.VITE_API_BASE_URL || ''}/auth/login`}
         className="ca-btn ca-btn-primary"
         style={{ textDecoration: 'none', fontSize: 13, padding: '14px 32px' }}
       >
